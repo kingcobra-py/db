@@ -54,30 +54,82 @@ class Pipeline:
         return int.from_bytes(digest,'big') & ((1<<63)-1)
 
     async def notify(self,chat_id:int,text:str,reply_to:int|None=None):
-        if not chat_id: return
-        try: await self.client.send_message(chat_id,text,reply_to=reply_to)
-        except Exception: LOG.exception('Progress notification failed',extra={'message_id':reply_to,'stage':'notification'})
+        if not chat_id: return None
+        try: return await self.client.send_message(chat_id,text,reply_to=reply_to)
+        except Exception: LOG.exception('Progress notification failed',extra={'message_id':reply_to,'stage':'notification'}); return None
+
+    @staticmethod
+    def _bar(fraction:float,width:int=16)->str:
+        fraction=0.0 if fraction<0 else 1.0 if fraction>1 else fraction
+        filled=int(fraction*width)
+        return '█'*filled+'░'*(width-filled)
+
+    @staticmethod
+    def _human(n:float)->str:
+        for unit in ('B','KB','MB','GB'):
+            if n<1024 or unit=='GB': return f'{n:.1f} {unit}'
+            n/=1024
+
+    def _make_progress_callback(self,progress_message,job_id:int,index:int,file_count:int,filename:str):
+        """Telethon progress_callback: writes progress to the DB (for web polling)
+        and edits one Telegram message in place (for chat). Both are throttled."""
+        state={'last_edit':0.0,'last_db':0.0,'last_pct':-1}
+        def callback(received:int,total:int):
+            now=time.monotonic()
+            pct=int(received*100/total) if total else 0
+            final=received>=total>0
+            # DB write: at most ~every 1s (the web poller reads this).
+            if now-state['last_db']>=1.0 or final:
+                state['last_db']=now
+                asyncio.create_task(asyncio.to_thread(
+                    self.db.update_progress,job_id,'downloading',received,total,filename,index,file_count))
+            # Telegram edit: only if we sent a chat message, throttled ~2s.
+            if progress_message is not None and (pct!=state['last_pct'] and (now-state['last_edit']>=2.0 or final)):
+                state['last_edit']=now; state['last_pct']=pct
+                fraction=received/total if total else 0.0
+                text=(f'📥 Downloading file {index}/{file_count}: {filename}\n'
+                      f'{self._bar(fraction)} {pct}%\n'
+                      f'{self._human(received)} / {self._human(total)}')
+                asyncio.create_task(self._safe_edit(progress_message,text))
+        return callback
+
+    async def _safe_edit(self,message,text:str):
+        try: await message.edit(text)
+        except Exception: pass  # Ignore 'message not modified', flood-wait, etc.
 
     async def queue_messages(self,*,messages:list,job_key:int,chat_id:int,user_id:int,source:str,source_link:str|None=None,notify:bool=True):
         inbox=self.s.inbox_dir/str(job_key); inbox.mkdir(parents=True,exist_ok=True,mode=0o700)
-        if notify: await self.notify(chat_id,'📥 Authorized upload received. Downloading…',messages[0].id if messages else None)
+        media_messages=[m for m in messages if m.media]
+        file_count=len(media_messages)
+        progress=None
+        if notify:
+            progress=await self.notify(chat_id,f'📥 Authorized upload received. Downloading {file_count} file(s)…',messages[0].id if messages else None)
+        # Create the job row up front (empty files, still 'pending') so the web
+        # dashboard has something to poll while the download is running.
+        job_id=await asyncio.to_thread(self.db.create_job,job_key,chat_id,user_id,[],source,source_link)
         files=[]; total=0
         try:
-            for index,message in enumerate(messages,1):
-                if not message.media: continue
+            for index,message in enumerate(media_messages,1):
                 filename=Path(getattr(message.file,'name',None) or f'upload-{index}.bin').name
                 destination=inbox/filename
                 if destination.exists(): destination=inbox/f'{index}-{filename}'
-                await message.download_media(file=str(destination))
+                await asyncio.to_thread(self.db.update_progress,job_id,'downloading',0,0,filename,index,file_count)
+                await message.download_media(
+                    file=str(destination),
+                    progress_callback=self._make_progress_callback(progress,job_id,index,file_count,filename),
+                )
                 total+=destination.stat().st_size
                 if total>self.s.max_download_bytes: raise ValueError('Download exceeds MAX_DOWNLOAD_BYTES')
                 files.append(str(destination))
             if not files: raise ValueError('Telegram message has no downloadable media')
-            job_id=await asyncio.to_thread(self.db.create_job,job_key,chat_id,user_id,files,source,source_link)
+            # Fill in the downloaded files and re-queue as pending for the worker.
+            await asyncio.to_thread(self.db.create_job,job_key,chat_id,user_id,files,source,source_link)
+            await asyncio.to_thread(self.db.clear_progress,job_id)
             await self.queue.put(QueueItem(job_id))
             if notify: await self.notify(chat_id,f'✅ Downloaded {len(files)} file(s); queued.',messages[0].id)
             return job_id
         except Exception:
+            await asyncio.to_thread(self.db.clear_progress,job_id)
             shutil.rmtree(inbox,ignore_errors=True); raise
 
     async def ingest_channel_link(self,url:str):
