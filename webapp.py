@@ -128,6 +128,18 @@ class Dashboard:
             asyncio.create_task(self.pipeline.ingest_channel_link(url),name='channel-link-ingest')
             return RedirectResponse('/?notice=Channel+download+submitted',303)
 
+        @self.app.get('/jobs/{job_id}/progress')
+        async def job_progress(job_id: int,request: Request):
+            self._require(request)
+            data=await asyncio.to_thread(self.db.progress_for_job,job_id)
+            if data is None: raise HTTPException(404,'Job not found')
+            pct=int(data['done']*100/data['total']) if data['total'] else 0
+            return {
+                'status':data['status'],'stage':data['stage'],
+                'done':data['done'],'total':data['total'],'percent':pct,
+                'file':data['file'],'index':data['index'],'count':data['count'],
+            }
+
         @self.app.get('/jobs/{job_id}/{kind}')
         async def download(job_id: int,kind: str,request: Request):
             self._require(request)
