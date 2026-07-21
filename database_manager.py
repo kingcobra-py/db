@@ -16,6 +16,7 @@ class Job:
 class DatabaseManager:
     def __init__(self, path: Path, inbox_dir: Path | None = None, work_dir: Path | None = None, output_dir: Path | None = None):
         self.path = path; self.inbox_dir = inbox_dir; self.work_dir = work_dir; self.output_dir = output_dir
+        self.config_path = self.path.parent / "config.json"
 
     def _connect(self):
         db = sqlite3.connect(self.path, timeout=30); db.row_factory = sqlite3.Row
@@ -160,3 +161,25 @@ class DatabaseManager:
                         shutil.rmtree(entry, ignore_errors=True)
                 except OSError: continue
         return {'files_removed': files_removed, 'bytes_freed': bytes_freed}
+
+    def _read_config(self) -> dict[str, Any]:
+        if not self.config_path.exists(): return {}
+        try:
+            with self.config_path.open('r', encoding='utf-8') as fh: return json.load(fh)
+        except (OSError, ValueError): return {}
+
+    def _write_config(self, data: dict[str, Any]) -> None:
+        self.config_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp_path = self.config_path.with_suffix('.json.tmp')
+        with tmp_path.open('w', encoding='utf-8') as fh: json.dump(data, fh)
+        tmp_path.replace(self.config_path)
+
+    def store_config(self, key: str, value: Any) -> None:
+        data = self._read_config(); data[key] = value; self._write_config(data)
+
+    def get_config(self, key: str, default: Any = None) -> Any:
+        return self._read_config().get(key, default)
+
+    def get_extraction_workers(self, default: int = 1) -> int:
+        try: return int(self.get_config('extraction_workers', default))
+        except (TypeError, ValueError): return default

@@ -37,6 +37,7 @@ class Settings:
     max_archive_files: int; max_scan_file_bytes: int
     max_nesting_depth: int; min_free_bytes: int
     extraction_timeout_seconds: int
+    extraction_workers: int
     fingerprint_key: bytes
     dashboard_password: str; dashboard_secret: bytes
     password_encryption_key: bytes
@@ -52,6 +53,10 @@ class Settings:
     def database_path(self): return self.data_root / "jobs.sqlite3"
     @property
     def password_store_path(self): return self.data_root / "archive-passwords.enc"
+    @property
+    def session_file_path(self): return self.data_root / "telegram_session.txt"
+    @property
+    def session_lock_path(self): return self.data_root / "telegram_session.lock"
 
     def prepare(self) -> None:
         self.data_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -71,6 +76,7 @@ def load_settings() -> Settings:
         max_nesting_depth=positive_int("MAX_NESTING_DEPTH", 3),
         min_free_bytes=positive_int("MIN_FREE_BYTES", 1024**3),
         extraction_timeout_seconds=positive_int("EXTRACTION_TIMEOUT_SECONDS", 1800),
+        extraction_workers=min(positive_int("EXTRACTION_WORKERS", 1), 24),
         fingerprint_key=required("FINGERPRINT_KEY").encode(),
         dashboard_password=required("DASHBOARD_PASSWORD"), dashboard_secret=required("DASHBOARD_SECRET").encode(),
         password_encryption_key=required("PASSWORD_ENCRYPTION_KEY").encode(),

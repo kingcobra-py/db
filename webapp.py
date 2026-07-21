@@ -103,7 +103,8 @@ class Dashboard:
             stats=await asyncio.to_thread(self.db.stats); jobs=await asyncio.to_thread(self.db.recent,30)
             passwords=await asyncio.to_thread(self.passwords.list_masked)
             storage_bytes=await asyncio.to_thread(self.db.get_total_compressed_size)
-            return self.templates.TemplateResponse(request=request,name='dashboard.html',context={'stats':stats,'jobs':jobs,'passwords':passwords,'csrf':self._csrf(),'notice':notice,'error':error,'storage_bytes':storage_bytes,'storage_human':_human(storage_bytes)})
+            extraction_workers=await asyncio.to_thread(self.db.get_extraction_workers,self.s.extraction_workers)
+            return self.templates.TemplateResponse(request=request,name='dashboard.html',context={'stats':stats,'jobs':jobs,'passwords':passwords,'csrf':self._csrf(),'notice':notice,'error':error,'storage_bytes':storage_bytes,'storage_human':_human(storage_bytes),'extraction_workers':extraction_workers})
 
         @self.app.get('/storage-info')
         async def storage_info(request: Request):
@@ -148,6 +149,17 @@ class Dashboard:
         async def delete_password(password_id: str,request: Request,csrf: str=Form(...)):
             self._require_post(request,csrf); await asyncio.to_thread(self.passwords.delete,password_id)
             return RedirectResponse('/?notice=Password+removed',303)
+
+        @self.app.post('/config/extraction-workers')
+        async def set_extraction_workers(request: Request,workers: int=Form(...),csrf: str=Form(...)):
+            self._require_post(request,csrf)
+            if workers<1 or workers>24:
+                return RedirectResponse(f'/?error={quote_plus("Workers must be between 1 and 24")}',303)
+            await asyncio.to_thread(self.db.store_config,'extraction_workers',workers)
+            if self.pipeline is not None and getattr(self.pipeline,'semaphore',None) is not None:
+                self.pipeline.semaphore._value=workers
+            LOG.info('Extraction workers updated',extra={'workers':workers,'stage':'config'})
+            return RedirectResponse(f'/?notice={quote_plus(f"Extraction workers set to {workers}")}',303)
 
         @self.app.post('/channel-links')
         async def add_link(request: Request,url: str=Form(...),max_files: str=Form('0'),csrf: str=Form(...)):

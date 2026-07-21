@@ -6,12 +6,14 @@ import logging
 import os
 import shutil
 import signal
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 import uvicorn
 from telethon import TelegramClient, events
+from telethon.errors import AuthKeyDuplicatedError
 from telethon.sessions import StringSession
 from telethon.tl.types import PeerChannel
 from config import Settings, load_settings
@@ -30,9 +32,63 @@ class QueueItem: job_id:int
 class Pipeline:
     def __init__(self,s:Settings):
         self.s=s; self.db=DatabaseManager(s.database_path,s.inbox_dir,s.work_dir,s.output_dir); self.queue:asyncio.Queue[QueueItem]=asyncio.Queue(maxsize=100)
-        self.client=TelegramClient(StringSession(s.string_session),s.api_id,s.api_hash)
+        self._lock_file=None
+        self._acquire_session_lock()
+        self.client=TelegramClient(StringSession(self._load_session_string()),s.api_id,s.api_hash)
         self.passwords=PasswordStore(s.password_store_path,s.password_encryption_key)
         self.extractor=ArchiveProcessor(s,self.passwords.list_plain)
+        self.semaphore=asyncio.Semaphore(s.extraction_workers)
+
+    def _acquire_session_lock(self,timeout_seconds:float=30.0)->None:
+        """Acquire an exclusive OS-level lock on the session lock file so that
+        two containers (e.g. the old and new one during a deploy) can never
+        share the same Telegram session at once."""
+        self.s.session_lock_path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+        self._lock_file=open(self.s.session_lock_path,'a+')
+        deadline=time.monotonic()+timeout_seconds
+        while True:
+            try:
+                if os.name=='nt':
+                    import msvcrt
+                    msvcrt.locking(self._lock_file.fileno(),msvcrt.LK_NBLCK,1)
+                else:
+                    import fcntl
+                    fcntl.flock(self._lock_file.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+                LOG.info('Session lock acquired',extra={'stage':'startup'})
+                return
+            except OSError:
+                if time.monotonic()>=deadline:
+                    LOG.error('Could not acquire session lock after %.0fs; another instance is likely still running',timeout_seconds,extra={'stage':'startup'})
+                    self._lock_file.close(); sys.exit(1)
+                time.sleep(1)
+
+    def _release_session_lock(self)->None:
+        if not self._lock_file: return
+        try:
+            if os.name=='nt':
+                import msvcrt
+                try: msvcrt.locking(self._lock_file.fileno(),msvcrt.LK_UNLCK,1)
+                except OSError: pass
+            else:
+                import fcntl
+                fcntl.flock(self._lock_file.fileno(),fcntl.LOCK_UN)
+        finally:
+            self._lock_file.close(); self._lock_file=None
+
+    def _load_session_string(self)->str:
+        path=self.s.session_file_path
+        if path.exists():
+            content=path.read_text(encoding='utf-8').strip()
+            if content: return content
+        return self.s.string_session
+
+    def _persist_session_string(self)->None:
+        try:
+            session_string=self.client.session.save()
+            self.s.session_file_path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+            self.s.session_file_path.write_text(session_string,encoding='utf-8')
+        except Exception:
+            LOG.exception('Failed to persist Telegram session file',extra={'stage':'startup'})
 
     @staticmethod
     def validate_channel_link(url:str)->tuple[str,int]:
@@ -186,11 +242,20 @@ class Pipeline:
             item=await self.queue.get()
             try:
                 job=await asyncio.to_thread(self.db.get_job,item.job_id)
-                if job and job.status in {'pending','running'}: await self.process(job)
+                if job and job.status in {'pending','running'}:
+                    async with self.semaphore: await self.process(job)
             finally: self.queue.task_done()
 
     async def run(self):
-        await asyncio.to_thread(self.db.initialize); self.register(); await self.client.start()
+        await asyncio.to_thread(self.db.initialize); self.register()
+        try:
+            await self.client.start()
+        except AuthKeyDuplicatedError:
+            LOG.error('Session was used from another instance simultaneously; removing local session file so it regenerates on restart',extra={'stage':'startup'})
+            try: self.s.session_file_path.unlink(missing_ok=True)
+            except OSError: pass
+            raise
+        self._persist_session_string()
         for job in await asyncio.to_thread(self.db.restore_interrupted_jobs): await self.queue.put(QueueItem(job.id))
         dashboard=Dashboard(self.s,self.db,self.passwords,self)
         server=uvicorn.Server(uvicorn.Config(dashboard.app,host=self.s.host,port=self.s.port,log_config=None,access_log=False))
@@ -199,6 +264,7 @@ class Pipeline:
         try: await self.client.run_until_disconnected()
         finally:
             server.should_exit=True; worker.cancel(); await asyncio.gather(worker,web,return_exceptions=True); await self.client.disconnect()
+            self._release_session_lock()
 
 async def main():
     s = load_settings()
