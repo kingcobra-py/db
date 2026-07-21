@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
@@ -13,7 +14,8 @@ class Job:
     input_files: list[str]; status: str; attempts: int
 
 class DatabaseManager:
-    def __init__(self, path: Path): self.path = path
+    def __init__(self, path: Path, inbox_dir: Path | None = None, work_dir: Path | None = None, output_dir: Path | None = None):
+        self.path = path; self.inbox_dir = inbox_dir; self.work_dir = work_dir; self.output_dir = output_dir
 
     def _connect(self):
         db = sqlite3.connect(self.path, timeout=30); db.row_factory = sqlite3.Row
@@ -123,3 +125,38 @@ class DatabaseManager:
         with self.connect() as db:
             r=db.execute(f"SELECT {column} AS path FROM jobs WHERE id=? AND status='completed'",(job_id,)).fetchone()
             return str(r['path']) if r and r['path'] else None
+
+    def get_total_compressed_size(self) -> int:
+        """Sum the on-disk size of every input (compressed) file referenced by any job."""
+        with self.connect() as db:
+            rows=db.execute("SELECT input_files_json FROM jobs").fetchall()
+        total=0
+        for row in rows:
+            try: files=json.loads(row['input_files_json'])
+            except (TypeError, ValueError): continue
+            for file_path in files:
+                try: total+=Path(file_path).stat().st_size
+                except OSError: continue
+        return total
+
+    def cleanup_all_files(self) -> dict[str, Any]:
+        """Remove everything in inbox_dir and work_dir, and clear output_dir.
+
+        Returns a summary dict with the number of files removed and bytes freed.
+        This does not touch job rows in the database, only files on disk.
+        """
+        files_removed=0; bytes_freed=0
+        for directory in (self.inbox_dir, self.work_dir, self.output_dir):
+            if not directory or not directory.exists(): continue
+            for entry in directory.iterdir():
+                try:
+                    if entry.is_file() or entry.is_symlink():
+                        bytes_freed+=entry.stat().st_size; files_removed+=1
+                        entry.unlink(missing_ok=True)
+                    elif entry.is_dir():
+                        for sub in entry.rglob('*'):
+                            if sub.is_file():
+                                bytes_freed+=sub.stat().st_size; files_removed+=1
+                        shutil.rmtree(entry, ignore_errors=True)
+                except OSError: continue
+        return {'files_removed': files_removed, 'bytes_freed': bytes_freed}
