@@ -6,3 +6,5 @@ Jinja2==3.1.6
 python-multipart==0.0.20
 cryptography==45.0.5
 python-dotenv==1.0.1
+aiohttp==3.10.11
+itsdangerous==2.2.0
