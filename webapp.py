@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import logging
 import secrets
 import time
 from pathlib import Path
@@ -13,7 +14,15 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+LOG = logging.getLogger('dashboard')
 SESSION_MAX_AGE = 12 * 60 * 60
+
+
+def _human(n: float) -> str:
+    for unit in ('B', 'KB', 'MB', 'GB'):
+        if n < 1024 or unit == 'GB': return f'{n:.1f} {unit}'
+        n /= 1024
+    return f'{n:.1f} GB'
 
 
 class Dashboard:
@@ -93,7 +102,27 @@ class Dashboard:
             if not self._authorized(request): return RedirectResponse('/login',303)
             stats=await asyncio.to_thread(self.db.stats); jobs=await asyncio.to_thread(self.db.recent,30)
             passwords=await asyncio.to_thread(self.passwords.list_masked)
-            return self.templates.TemplateResponse(request=request,name='dashboard.html',context={'stats':stats,'jobs':jobs,'passwords':passwords,'csrf':self._csrf(),'notice':notice,'error':error})
+            storage_bytes=await asyncio.to_thread(self.db.get_total_compressed_size)
+            return self.templates.TemplateResponse(request=request,name='dashboard.html',context={'stats':stats,'jobs':jobs,'passwords':passwords,'csrf':self._csrf(),'notice':notice,'error':error,'storage_bytes':storage_bytes,'storage_human':_human(storage_bytes)})
+
+        @self.app.get('/storage-info')
+        async def storage_info(request: Request):
+            self._require(request)
+            total_bytes=await asyncio.to_thread(self.db.get_total_compressed_size)
+            return {'total_bytes':total_bytes,'total_human_readable':_human(total_bytes)}
+
+        @self.app.post('/cleanup-files')
+        async def cleanup_files(request: Request,csrf: str=Form(...)):
+            self._require_post(request,csrf)
+            try:
+                summary=await asyncio.to_thread(self.db.cleanup_all_files)
+                files_removed=summary['files_removed']; freed=_human(summary['bytes_freed'])
+                LOG.info('Cleanup performed',extra={'files_removed':files_removed,'bytes_freed':summary['bytes_freed'],'stage':'cleanup'})
+                notice=f'Cleanup complete: removed {files_removed} file(s), freed {freed}'
+                return RedirectResponse(f'/?notice={quote_plus(notice)}',303)
+            except Exception as exc:
+                LOG.exception('Cleanup failed',extra={'stage':'cleanup'})
+                return RedirectResponse(f'/?error={quote_plus(f"Cleanup failed: {exc}")}',303)
 
         @self.app.post('/passwords')
         async def add_password(request: Request,password: str=Form(...),csrf: str=Form(...)):

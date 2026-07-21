@@ -29,7 +29,7 @@ class QueueItem: job_id:int
 
 class Pipeline:
     def __init__(self,s:Settings):
-        self.s=s; self.db=DatabaseManager(s.database_path); self.queue:asyncio.Queue[QueueItem]=asyncio.Queue(maxsize=100)
+        self.s=s; self.db=DatabaseManager(s.database_path,s.inbox_dir,s.work_dir,s.output_dir); self.queue:asyncio.Queue[QueueItem]=asyncio.Queue(maxsize=100)
         self.client=TelegramClient(StringSession(s.string_session),s.api_id,s.api_hash)
         self.passwords=PasswordStore(s.password_store_path,s.password_encryption_key)
         self.extractor=ArchiveProcessor(s,self.passwords.list_plain)
