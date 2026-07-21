@@ -125,9 +125,7 @@ class Dashboard:
             self._require_post(request,csrf)
             try: self.pipeline.validate_channel_link(url)
             except ValueError as exc: return RedirectResponse(f'/?error={quote_plus(str(exc))}',303)
-            try: limit=max(0,min(int(max_files),40))
-            except ValueError: limit=0
-            asyncio.create_task(self.pipeline.ingest_channel_link(url,limit),name='channel-link-ingest')
+            asyncio.create_task(self.pipeline.ingest_channel_link(url),name='channel-link-ingest')
             return RedirectResponse('/?notice=Channel+download+submitted',303)
 
         @self.app.get('/jobs/{job_id}/{kind}')
