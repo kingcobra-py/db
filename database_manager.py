@@ -40,10 +40,21 @@ class DatabaseManager:
                 attempts INTEGER NOT NULL DEFAULT 0,source TEXT NOT NULL DEFAULT 'telegram',
                 source_link TEXT,output_text TEXT,summary_json TEXT,summary_data TEXT,error TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,started_at TEXT,completed_at TEXT,
+                progress_stage TEXT,progress_done INTEGER NOT NULL DEFAULT 0,progress_total INTEGER NOT NULL DEFAULT 0,
+                progress_file TEXT,progress_index INTEGER NOT NULL DEFAULT 0,progress_count INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
             columns = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
             if "source" not in columns: db.execute("ALTER TABLE jobs ADD COLUMN source TEXT NOT NULL DEFAULT 'telegram'")
             if "source_link" not in columns: db.execute("ALTER TABLE jobs ADD COLUMN source_link TEXT")
+            for col, ddl in (
+                ("progress_stage", "progress_stage TEXT"),
+                ("progress_done", "progress_done INTEGER NOT NULL DEFAULT 0"),
+                ("progress_total", "progress_total INTEGER NOT NULL DEFAULT 0"),
+                ("progress_file", "progress_file TEXT"),
+                ("progress_index", "progress_index INTEGER NOT NULL DEFAULT 0"),
+                ("progress_count", "progress_count INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if col not in columns: db.execute(f"ALTER TABLE jobs ADD COLUMN {ddl}")
             db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status,created_at)")
 
     def _job(self, r): return Job(int(r['id']),int(r['message_id']),int(r['chat_id']),int(r['user_id']),json.loads(r['input_files_json']),str(r['status']),int(r['attempts']))
@@ -68,6 +79,26 @@ class DatabaseManager:
 
     def mark_running(self,job_id):
         with self.connect() as db: db.execute("UPDATE jobs SET status='running',attempts=attempts+1,started_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP,error=NULL WHERE id=?",(job_id,))
+
+    def update_progress(self,job_id,stage,done,total,filename,index,count):
+        with self.connect() as db:
+            db.execute("""UPDATE jobs SET progress_stage=?,progress_done=?,progress_total=?,progress_file=?,
+                progress_index=?,progress_count=?,updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                (stage,int(done),int(total),filename,int(index),int(count),job_id))
+
+    def clear_progress(self,job_id):
+        with self.connect() as db:
+            db.execute("""UPDATE jobs SET progress_stage=NULL,progress_done=0,progress_total=0,
+                progress_file=NULL,progress_index=0,progress_count=0,updated_at=CURRENT_TIMESTAMP WHERE id=?""",(job_id,))
+
+    def progress_for_job(self,job_id):
+        with self.connect() as db:
+            r=db.execute("""SELECT status,progress_stage,progress_done,progress_total,progress_file,
+                progress_index,progress_count FROM jobs WHERE id=?""",(job_id,)).fetchone()
+        if not r: return None
+        return {'status':r['status'],'stage':r['progress_stage'],'done':int(r['progress_done']),
+                'total':int(r['progress_total']),'file':r['progress_file'],
+                'index':int(r['progress_index']),'count':int(r['progress_count'])}
 
     def mark_completed(self,job_id,text,summary_json,summary):
         with self.connect() as db: db.execute("UPDATE jobs SET status='completed',output_text=?,summary_json=?,summary_data=?,completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP,error=NULL WHERE id=?",(text,summary_json,json.dumps(summary),job_id))
