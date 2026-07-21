@@ -6,6 +6,8 @@ import hmac
 import logging
 import secrets
 import time
+import os
+import aiohttp
 from pathlib import Path
 from urllib.parse import quote_plus
 from typing import Any
@@ -13,6 +15,10 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.sessions import SessionMiddleware
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+from telethon.errors import PhoneNumberInvalidError, CodeInvalidError, PasswordHashInvalidError
 
 LOG = logging.getLogger('dashboard')
 SESSION_MAX_AGE = 12 * 60 * 60
@@ -63,6 +69,8 @@ class Dashboard:
         if not secrets.compare_digest(csrf,self._csrf()): raise HTTPException(403,'Invalid CSRF token')
 
     def _middleware(self):
+        self.app.add_middleware(SessionMiddleware, secret_key=self.s.dashboard_secret.hex(), max_age=900)
+
         @self.app.middleware('http')
         async def security_headers(request, call_next):
             response=await call_next(request)
@@ -192,3 +200,101 @@ class Dashboard:
             except ValueError: raise HTTPException(403,'Invalid output path')
             if not path.is_file(): raise HTTPException(404,'File missing')
             return FileResponse(path,filename=path.name,media_type='application/json' if kind=='summary' else 'text/plain')
+
+        @self.app.get('/session-regenerate')
+        async def session_regenerate(request: Request):
+            self._require(request)
+            return self.templates.TemplateResponse(
+                request=request,
+                name='session_regenerate.html',
+                context={'csrf': self._csrf(), 'step': 1}
+            )
+
+        @self.app.post('/session-regenerate/send-code')
+        async def send_code(request: Request, phone_number: str = Form(...), csrf: str = Form(...)):
+            self._require_post(request, csrf)
+            try:
+                temp_client = TelegramClient(StringSession(), self.s.api_id, self.s.api_hash)
+                await temp_client.connect()
+                result = await temp_client.send_code_request(phone_number)
+
+                request.session['phone_hash'] = result.phone_code_hash
+                request.session['phone_number'] = phone_number
+
+                await temp_client.disconnect()
+                return self.templates.TemplateResponse(
+                    request=request,
+                    name='session_regenerate.html',
+                    context={'csrf': self._csrf(), 'step': 2, 'phone': phone_number}
+                )
+            except PhoneNumberInvalidError:
+                return RedirectResponse(f'/?error={quote_plus("Invalid phone number")}', 303)
+            except Exception as e:
+                LOG.exception('Failed to send code')
+                return RedirectResponse(f'/?error={quote_plus(str(e))}', 303)
+
+        @self.app.post('/session-regenerate/verify-code')
+        async def verify_code(request: Request, code: str = Form(...), password: str = Form(''), csrf: str = Form(...)):
+            self._require_post(request, csrf)
+            try:
+                phone_hash = request.session.get('phone_hash')
+                phone_number = request.session.get('phone_number')
+
+                if not phone_hash:
+                    return RedirectResponse('/?error=Session+expired', 303)
+
+                temp_client = TelegramClient(StringSession(), self.s.api_id, self.s.api_hash)
+                await temp_client.connect()
+                await temp_client.sign_in(phone_number, code, phone_code_hash=phone_hash, password=password or None)
+
+                new_session = temp_client.session.save()
+
+                await asyncio.to_thread(self.db.store_config, 'TELEGRAM_STRING_SESSION', new_session)
+
+                await temp_client.disconnect()
+                del request.session['phone_hash']
+                del request.session['phone_number']
+
+                # AUTO-REDEPLOY
+                try:
+                    api_token = os.getenv('RAILWAY_API_TOKEN')
+                    service_id = 'c0c2cff9-6e80-454d-b9fa-b12c1888c55b'
+
+                    if api_token:
+                        async with aiohttp.ClientSession() as session:
+                            headers = {'Authorization': f'Bearer {api_token}'}
+                            mutation = f"""
+                            mutation {{
+                              deploymentTrigger(input: {{
+                                serviceId: "{service_id}"
+                              }}) {{
+                                deployment {{
+                                  id
+                                }}
+                              }}
+                            }}
+                            """
+
+                            async with session.post(
+                                'https://api.railway.app/graphql',
+                                json={'query': mutation},
+                                headers=headers,
+                                timeout=aiohttp.ClientTimeout(total=10)
+                            ) as resp:
+                                if resp.status == 200:
+                                    LOG.info('Redeploy triggered')
+                                else:
+                                    LOG.error(f'Redeploy failed: {resp.status}')
+                except Exception as e:
+                    LOG.error(f'Redeploy error: {e}')
+
+                LOG.info('Telegram session regenerated + redeploy triggered')
+                return RedirectResponse('/?notice=Session+updated.+Service+redeploying...', 303)
+
+            except CodeInvalidError:
+                return RedirectResponse(f'/?error={quote_plus("Invalid code")}', 303)
+            except PasswordHashInvalidError:
+                return RedirectResponse(f'/?error={quote_plus("Wrong 2FA password")}', 303)
+            except Exception as e:
+                LOG.exception('Failed to verify code')
+                return RedirectResponse(f'/?error={quote_plus(str(e))}', 303)
