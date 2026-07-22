@@ -377,7 +377,25 @@ class Dashboard:
 
                 temp_client = TelegramClient(StringSession(), self.s.api_id, self.s.api_hash)
                 await temp_client.connect()
-                await temp_client.sign_in(phone_number, code, phone_code_hash=phone_hash, password=password or None)
+
+                # Retry logic: sometimes first attempt times out
+                max_attempts = 3
+                last_error = None
+
+                for attempt in range(max_attempts):
+                    try:
+                        await temp_client.sign_in(phone_number, code, phone_code_hash=phone_hash, password=password or None)
+                        break  # Success
+                    except CodeInvalidError:
+                        raise  # Don't retry on invalid code
+                    except Exception as e:
+                        last_error = e
+                        if attempt < max_attempts - 1:
+                            LOG.warning(f'Sign-in attempt {attempt + 1} failed: {e}, retrying...')
+                            await asyncio.sleep(0.5)  # Small delay before retry
+                            continue
+                        else:
+                            raise
 
                 new_session = temp_client.session.save()
 
@@ -424,9 +442,12 @@ class Dashboard:
                 return RedirectResponse('/?notice=Session+updated.+Service+redeploying...', 303)
 
             except CodeInvalidError:
-                return RedirectResponse(f'/?error={quote_plus("Invalid code")}', 303)
+                return RedirectResponse(f'/?error={quote_plus("Invalid code - check digits and try again")}', 303)
             except PasswordHashInvalidError:
                 return RedirectResponse(f'/?error={quote_plus("Wrong 2FA password")}', 303)
             except Exception as e:
+                error_msg = str(e)
+                if "expired" in error_msg.lower():
+                    error_msg = "Code expired. Request a new code and try again."
                 LOG.exception('Failed to verify code')
-                return RedirectResponse(f'/?error={quote_plus(str(e))}', 303)
+                return RedirectResponse(f'/?error={quote_plus(error_msg)}', 303)
