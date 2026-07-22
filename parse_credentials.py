@@ -3,8 +3,11 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import re
 from pathlib import Path
+
+LOG = logging.getLogger('credentials')
 
 # Which folders are considered valid
 FOLDER_PATTERN_OLD = re.compile(r"soft.*azure.*aws", re.IGNORECASE)
@@ -30,20 +33,44 @@ def _fingerprint(value: str, key: bytes) -> str:
 
 
 def _should_scan_file(path: Path) -> bool:
-    """Check if this 'credentials' file sits in a matching folder."""
-    # Case‑insensitive name check
-    if path.name.lower() != TARGET_NAME:
+    """Check if file should be scanned for credentials.
+    
+    Scans: .txt, .csv, .log, .conf, .json, .yaml, .yml, 'credentials' files
+    in folders containing 'aws', 'azure', 'credentials', 'secret', or similar keywords
+    """
+    if not path.is_file():
         return False
-    parent = str(path.parent).lower()
-    # Old pattern: soft + azure + aws
-    if FOLDER_PATTERN_OLD.search(parent):
-        return True
-    # New pattern: applications + azure (and either .aws or credentials in path)
-    if FOLDER_PATTERN_NEW.search(parent):
-        # Additional check: either ".aws" appears in the path or the file itself is 'credentials'
-        if ".aws" in parent or path.name.lower() == TARGET_NAME:
-            return True
-    return False
+    
+    # File extensions to scan
+    valid_extensions = {'.txt', '.csv', '.log', '.conf', '.json', '.yaml', '.yml', ''}
+    file_ext = path.suffix.lower()
+    file_name = path.name.lower()
+    
+    # Allow files with valid extensions OR files named 'credentials'
+    if file_ext not in valid_extensions and file_name != 'credentials':
+        return False
+    
+    # Check folder path for relevant keywords
+    parent_path = str(path.parent).lower()
+    keywords = {'aws', 'azure', 'credentials', 'secret', 'config', 'keys', 'tokens', '.aws'}
+    
+    return any(keyword in parent_path for keyword in keywords)
+
+
+def _count_scannable_files(root: Path) -> int:
+    """Count how many files will be scanned before scanning starts."""
+    count = 0
+    root = root.resolve()
+    
+    try:
+        for path in root.rglob("*"):
+            if _should_scan_file(path):
+                if path.stat().st_size <= 100 * 1024 * 1024:  # 100MB limit
+                    count += 1
+    except Exception:
+        pass
+    
+    return count
 
 
 def scan_tree(root: Path, max_file_bytes: int, fingerprint_key: bytes):
@@ -51,7 +78,11 @@ def scan_tree(root: Path, max_file_bytes: int, fingerprint_key: bytes):
     files_scanned = 0
     root = root.resolve()
 
-    # Recursively find all 'credentials' files in matching folders
+    # Log how many scannable files we found
+    scannable_count = _count_scannable_files(root)
+    LOG.info(f'Starting credential scan on {scannable_count} scannable files', extra={'stage': 'scanning', 'scannable_files': scannable_count})
+
+    # Recursively find all scannable files
     for path in root.rglob("*"):
         if not path.is_file():
             continue
@@ -89,6 +120,10 @@ def scan_tree(root: Path, max_file_bytes: int, fingerprint_key: bytes):
             for _, kind, _ in PATTERNS
         },
     }
+    
+    LOG.info(f'Scan complete: {files_scanned} files scanned, {len(findings)} total findings', 
+             extra={'stage': 'scanning', 'files_scanned': files_scanned, 'findings': len(findings)})
+    
     return findings, summary
 
 
@@ -117,7 +152,7 @@ def extract_raw_credentials(root: Path) -> list[dict]:
     """Extract actual AWS credentials from scanned files.
     
     Returns list of dicts: [{"access_key": "...", "secret_key": "...", "region": "...", "file": "...", "line": ...}, ...]
-    Deduplicates by access_key.
+    Deduplicates by access_key and logs progress.
     """
     creds_dict = {}
     region_pattern = re.compile(
@@ -128,9 +163,18 @@ def extract_raw_credentials(root: Path) -> list[dict]:
     )
     
     root = root.resolve()
+    files_with_creds = set()
+    region_counts = {}
+    
+    # Count scannable files first
+    scannable_count = _count_scannable_files(root)
+    LOG.info(f'Starting raw credential extraction on {scannable_count} scannable files', 
+             extra={'stage': 'credential-extraction', 'scannable_files': scannable_count})
     
     for path in root.rglob("*"):
-        if not path.is_file() or not _should_scan_file(path) or path.stat().st_size > 1024 * 1024:
+        if not _should_scan_file(path):
+            continue
+        if path.stat().st_size > 1024 * 1024:  # Skip files > 1MB
             continue
         
         rel_path = str(path.relative_to(root))
@@ -170,6 +214,8 @@ def extract_raw_credentials(root: Path) -> list[dict]:
                         region = m.group(1)
                         break
                 
+                region_counts[region] = region_counts.get(region, 0) + 1
+                
                 if key not in creds_dict:
                     creds_dict[key] = {
                         "access_key": key,
@@ -178,5 +224,11 @@ def extract_raw_credentials(root: Path) -> list[dict]:
                         "file": key_file,
                         "line": key_line,
                     }
+                    files_with_creds.add(key_file)
     
-    return list(creds_dict.values())
+    result = list(creds_dict.values())
+    LOG.info(f'Credential extraction complete: {len(result)} credentials extracted from {len(files_with_creds)} files. Regions: {region_counts}',
+             extra={'stage': 'credential-extraction', 'credentials_found': len(result), 
+                    'files_with_creds': len(files_with_creds), 'region_distribution': region_counts})
+    
+    return result
