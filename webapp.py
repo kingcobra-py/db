@@ -19,7 +19,13 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.errors import PhoneNumberInvalidError, CodeInvalidError, PasswordHashInvalidError
+from telethon.errors import (
+    PhoneNumberInvalidError,
+    CodeInvalidError,
+    PasswordHashInvalidError,
+    SessionPasswordNeededError,
+)
+from secure_logging import recent_activity_logs
 
 LOG = logging.getLogger('dashboard')
 SESSION_MAX_AGE = 12 * 60 * 60
@@ -46,28 +52,35 @@ class Dashboard:
 
     def _issue_session(self) -> str:
         issued = str(int(time.time()))
-        return f"{issued}.{self._sign('dashboard-session:' + issued)}"
+        nonce = secrets.token_hex(8)
+        return f"{issued}.{nonce}.{self._sign('dashboard-session:' + issued + ':' + nonce)}"
 
     def _valid_session(self, token: str) -> bool:
         if not token:
             return False
         try:
-            issued_str, mac = token.split('.', 1)
+            issued_str, nonce, mac = token.split('.', 2)
             issued = int(issued_str)
         except ValueError:
             return False
-        if not secrets.compare_digest(mac, self._sign('dashboard-session:' + issued_str)):
+        expected = self._sign('dashboard-session:' + issued_str + ':' + nonce)
+        if not hmac.compare_digest(mac, expected):
             return False
         age = time.time() - issued
         return 0 <= age <= SESSION_MAX_AGE
 
-    def _csrf(self): return hmac.new(self.s.dashboard_secret,b'dashboard-csrf',hashlib.sha256).hexdigest()
+    def _csrf(self, request: Request) -> str:
+        session = request.cookies.get('scanner_session', '')
+        return hmac.new(self.s.dashboard_secret, f'dashboard-csrf:{session}'.encode(), hashlib.sha256).hexdigest()
+
     def _authorized(self, request: Request): return self._valid_session(request.cookies.get('scanner_session',''))
     def _require(self, request: Request):
         if not self._authorized(request): raise HTTPException(401,'Authentication required')
     def _require_post(self, request: Request, csrf: str):
         self._require(request)
-        if not secrets.compare_digest(csrf,self._csrf()): raise HTTPException(403,'Invalid CSRF token')
+        expected = self._csrf(request)
+        if not csrf or not hmac.compare_digest(csrf, expected):
+            raise HTTPException(403,'Invalid CSRF token')
 
     def _expand_message_range(self, url: str) -> list[str]:
         """
@@ -112,8 +125,12 @@ class Dashboard:
             base_parts = parts[:-1]
             base_url = f"https://t.me/{'/'.join(base_parts)}"
 
-            # Expand to individual URLs
-            urls = [f"{base_url}/{msg_id}" for msg_id in range(start, end + 1)]
+            # Expand to individual URLs and validate each
+            urls = []
+            for msg_id in range(start, end + 1):
+                candidate = f"{base_url}/{msg_id}"
+                self.pipeline.validate_channel_link(candidate)
+                urls.append(candidate)
             return urls
         else:
             # Single message, validate and return as-is
@@ -149,7 +166,10 @@ class Dashboard:
 
         @self.app.post('/login')
         async def login(request: Request,password: str=Form(...)):
-            if not secrets.compare_digest(password,self.s.dashboard_password):
+            # Hash both sides so compare_digest stays constant-time across length mismatches.
+            provided = hashlib.sha256(password.encode('utf-8')).hexdigest()
+            expected = hashlib.sha256(self.s.dashboard_password.encode('utf-8')).hexdigest()
+            if not hmac.compare_digest(provided, expected):
                 await asyncio.sleep(0.75)
                 return self.templates.TemplateResponse(request=request,name='login.html',context={'error':'Incorrect password'},status_code=401)
             response=RedirectResponse('/',303)
@@ -168,7 +188,7 @@ class Dashboard:
             passwords=await asyncio.to_thread(self.passwords.list_masked)
             storage_bytes=await asyncio.to_thread(self.db.get_total_compressed_size)
             extraction_workers=await asyncio.to_thread(self.db.get_extraction_workers,self.s.extraction_workers)
-            return self.templates.TemplateResponse(request=request,name='dashboard.html',context={'stats':stats,'jobs':jobs,'passwords':passwords,'csrf':self._csrf(),'notice':notice,'error':error,'storage_bytes':storage_bytes,'storage_human':_human(storage_bytes),'extraction_workers':extraction_workers})
+            return self.templates.TemplateResponse(request=request,name='dashboard.html',context={'stats':stats,'jobs':jobs,'passwords':passwords,'csrf':self._csrf(request),'notice':notice,'error':error,'storage_bytes':storage_bytes,'storage_human':_human(storage_bytes),'extraction_workers':extraction_workers})
 
         @self.app.get('/storage-info')
         async def storage_info(request: Request):
@@ -220,8 +240,8 @@ class Dashboard:
             if workers<1 or workers>24:
                 return RedirectResponse(f'/?error={quote_plus("Workers must be between 1 and 24")}',303)
             await asyncio.to_thread(self.db.store_config,'extraction_workers',workers)
-            if self.pipeline is not None and getattr(self.pipeline,'semaphore',None) is not None:
-                self.pipeline.semaphore._value=workers
+            if self.pipeline is not None and hasattr(self.pipeline, 'set_extraction_workers'):
+                self.pipeline.set_extraction_workers(workers)
             LOG.info('Extraction workers updated',extra={'workers':workers,'stage':'config'})
             return RedirectResponse(f'/?notice={quote_plus(f"Extraction workers set to {workers}")}',303)
 
@@ -239,19 +259,23 @@ class Dashboard:
             if not urls_to_submit:
                 return RedirectResponse(f'/?error={quote_plus("No valid URLs to submit")}', 303)
 
-            # Submit all URLs
+            # Queue sequentially via ingest worker to avoid Telegram flood failures.
             for submit_url in urls_to_submit:
-                asyncio.create_task(self.pipeline.ingest_channel_link(submit_url), name='channel-link-ingest')
+                await self.pipeline.enqueue_channel_link(submit_url)
 
             count = len(urls_to_submit)
-            msg = f"Submitted {count} download(s)" if count > 1 else "Channel download submitted"
+            msg = f"Queued {count} download(s)" if count > 1 else "Channel download queued"
+            LOG.info('Channel links accepted', extra={'stage': 'web-ingest', 'count': count})
             return RedirectResponse(f'/?notice={quote_plus(msg)}', 303)
 
         @self.app.post('/jobs/stop-all')
         async def stop_all_jobs(request: Request, csrf: str = Form(...)):
             """Stop all running and pending jobs."""
             self._require_post(request, csrf)
-            count = await asyncio.to_thread(self.db.stop_all_jobs)
+            if hasattr(self.pipeline, 'request_stop_all'):
+                count = await self.pipeline.request_stop_all()
+            else:
+                count = await asyncio.to_thread(self.db.stop_all_jobs)
             return RedirectResponse(f'/?notice={quote_plus(f"Stopped {count} job(s)")}', 303)
 
         @self.app.get('/jobs/{job_id}/progress')
@@ -270,18 +294,14 @@ class Dashboard:
         async def job_scan_metrics(job_id: int, request: Request):
             """Return scan metrics (files_scanned, findings) for a completed job."""
             self._require(request)
-            data = await asyncio.to_thread(self.db.output_for_job, job_id, 'summary')
-            if not data:
+            summary_json = await asyncio.to_thread(self.db.summary_data_for_job, job_id)
+            if not summary_json:
                 raise HTTPException(404, 'Job not found or summary unavailable')
-            try:
-                summary_json = json.loads(data)
-                return {
-                    'files_scanned': summary_json.get('files_scanned', 0),
-                    'findings': summary_json.get('findings', 0),
-                    'by_type': summary_json.get('by_type', {})
-                }
-            except Exception:
-                raise HTTPException(500, 'Could not parse job summary')
+            return {
+                'files_scanned': summary_json.get('files_scanned', 0),
+                'findings': summary_json.get('findings', 0),
+                'by_type': summary_json.get('by_type', {})
+            }
 
         @self.app.get('/jobs/{job_id}/{kind}')
         async def download(job_id: int,kind: str,request: Request):
@@ -299,21 +319,12 @@ class Dashboard:
         async def get_logs(request: Request):
             """Return recent activity logs."""
             self._require(request)
-            # For now, return a hardcoded empty list; can be expanded to read from database
-            # or a logs file at /data/logs.json
-            try:
-                logs_file = self.s.data_root / 'activity-logs.json'
-                if logs_file.exists():
-                    logs_data = json.loads(logs_file.read_text(encoding='utf-8'))
-                    return logs_data[-30:]  # Last 30 entries
-            except Exception:
-                pass
-            return []
+            return await asyncio.to_thread(recent_activity_logs, 30)
 
         @self.app.get('/credentials')
         async def get_credentials(request: Request):
             self._require(request)
-            return await asyncio.to_thread(self.db.get_all_credentials)
+            return await asyncio.to_thread(self.db.get_all_credentials, mask_secrets=True)
 
         @self.app.post('/credentials/clear-all')
         async def clear_creds(request: Request, csrf: str = Form(...)):
@@ -324,7 +335,7 @@ class Dashboard:
         @self.app.get('/credentials/export')
         async def export_creds(request: Request):
             self._require(request)
-            creds = await asyncio.to_thread(self.db.get_all_credentials)
+            creds = await asyncio.to_thread(self.db.get_all_credentials, mask_secrets=False)
             lines = []
             for c in creds:
                 line = f"{c['access_key']}:{c['secret_key']}:{c['region']}"
@@ -339,7 +350,7 @@ class Dashboard:
             return self.templates.TemplateResponse(
                 request=request,
                 name='session_regenerate.html',
-                context={'csrf': self._csrf(), 'step': 1}
+                context={'csrf': self._csrf(request), 'step': 1}
             )
 
         @self.app.post('/session-regenerate/send-code')
@@ -357,7 +368,7 @@ class Dashboard:
                 return self.templates.TemplateResponse(
                     request=request,
                     name='session_regenerate.html',
-                    context={'csrf': self._csrf(), 'step': 2, 'phone': phone_number}
+                    context={'csrf': self._csrf(request), 'step': 2, 'phone': phone_number}
                 )
             except PhoneNumberInvalidError:
                 return RedirectResponse(f'/?error={quote_plus("Invalid phone number")}', 303)
@@ -380,37 +391,50 @@ class Dashboard:
 
                 # Retry logic: sometimes first attempt times out
                 max_attempts = 3
-                last_error = None
+                signed_in = False
 
                 for attempt in range(max_attempts):
                     try:
-                        await temp_client.sign_in(phone_number, code, phone_code_hash=phone_hash, password=password or None)
-                        break  # Success
+                        await temp_client.sign_in(phone_number, code, phone_code_hash=phone_hash)
+                        signed_in = True
+                        break
+                    except SessionPasswordNeededError:
+                        if not password:
+                            await temp_client.disconnect()
+                            return RedirectResponse(
+                                f'/?error={quote_plus("2FA password required")}', 303
+                            )
+                        await temp_client.sign_in(password=password)
+                        signed_in = True
+                        break
                     except CodeInvalidError:
-                        raise  # Don't retry on invalid code
+                        raise
+                    except PasswordHashInvalidError:
+                        raise
                     except Exception as e:
-                        last_error = e
                         if attempt < max_attempts - 1:
                             LOG.warning(f'Sign-in attempt {attempt + 1} failed: {e}, retrying...')
-                            await asyncio.sleep(0.5)  # Small delay before retry
+                            await asyncio.sleep(0.5)
                             continue
-                        else:
-                            raise
+                        raise
+
+                if not signed_in:
+                    raise RuntimeError('Sign-in did not complete')
 
                 new_session = temp_client.session.save()
-
-                await asyncio.to_thread(self.db.store_config, 'TELEGRAM_STRING_SESSION', new_session)
+                # Persist where the pipeline actually loads from on restart.
+                await asyncio.to_thread(self.pipeline._persist_session_string, new_session)
 
                 await temp_client.disconnect()
-                del request.session['phone_hash']
-                del request.session['phone_number']
+                request.session.pop('phone_hash', None)
+                request.session.pop('phone_number', None)
 
-                # AUTO-REDEPLOY
+                # AUTO-REDEPLOY (optional)
                 try:
                     api_token = os.getenv('RAILWAY_API_TOKEN')
-                    service_id = 'c0c2cff9-6e80-454d-b9fa-b12c1888c55b'
+                    service_id = os.getenv('RAILWAY_SERVICE_ID', '').strip()
 
-                    if api_token:
+                    if api_token and service_id:
                         async with aiohttp.ClientSession() as session:
                             headers = {'Authorization': f'Bearer {api_token}'}
                             mutation = f"""
@@ -432,14 +456,17 @@ class Dashboard:
                                 timeout=aiohttp.ClientTimeout(total=10)
                             ) as resp:
                                 if resp.status == 200:
-                                    LOG.info('Redeploy triggered')
+                                    LOG.info('Redeploy triggered', extra={'stage': 'session'})
                                 else:
-                                    LOG.error(f'Redeploy failed: {resp.status}')
+                                    LOG.error(f'Redeploy failed: {resp.status}', extra={'stage': 'session'})
+                    elif api_token and not service_id:
+                        LOG.warning('RAILWAY_API_TOKEN set but RAILWAY_SERVICE_ID missing; skip redeploy', extra={'stage': 'session'})
                 except Exception as e:
-                    LOG.error(f'Redeploy error: {e}')
+                    LOG.error(f'Redeploy error: {e}', extra={'stage': 'session'})
 
-                LOG.info('Telegram session regenerated + redeploy triggered')
-                return RedirectResponse('/?notice=Session+updated.+Service+redeploying...', 303)
+                LOG.info('Telegram session regenerated', extra={'stage': 'session'})
+                notice = 'Session updated. Restart or redeploy the service to apply it.'
+                return RedirectResponse(f'/?notice={quote_plus(notice)}', 303)
 
             except CodeInvalidError:
                 return RedirectResponse(f'/?error={quote_plus("Invalid code - check digits and try again")}', 303)
@@ -449,5 +476,5 @@ class Dashboard:
                 error_msg = str(e)
                 if "expired" in error_msg.lower():
                     error_msg = "Code expired. Request a new code and try again."
-                LOG.exception('Failed to verify code')
+                LOG.exception('Failed to verify code', extra={'stage': 'session'})
                 return RedirectResponse(f'/?error={quote_plus(error_msg)}', 303)

@@ -8,7 +8,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Set, Tuple
 
 LOG = logging.getLogger('credentials')
 
@@ -38,7 +38,7 @@ PATTERNS = (
 def _fingerprint(value: str, key: bytes) -> str:
     return hmac.new(key, value.encode(), hashlib.sha256).hexdigest()[:16]
 
-def _should_scan_file(path: Path) -> bool:
+def _should_scan_file(path: Path, output_dir: Path | None = None) -> bool:
     if not path.is_file():
         return False
     valid_extensions = {'.txt', '.csv', '.log', '.conf', '.json', '.yaml', '.yml', ''}
@@ -46,20 +46,21 @@ def _should_scan_file(path: Path) -> bool:
     file_name = path.name.lower()
     if file_ext not in valid_extensions and file_name != 'credentials':
         return False
-    try:
-        path.resolve().relative_to(Path('/data/output'))
-        return False
-    except ValueError:
-        pass
+    if output_dir is not None:
+        try:
+            path.resolve().relative_to(output_dir.resolve())
+            return False
+        except ValueError:
+            pass
     return True
 
-def _count_scannable_files(root: Path) -> int:
+def _count_scannable_files(root: Path, max_file_bytes: int, output_dir: Path | None = None) -> int:
     count = 0
     root = root.resolve()
     try:
         for path in root.rglob("*"):
-            if _should_scan_file(path):
-                if path.stat().st_size <= 100 * 1024 * 1024:
+            if _should_scan_file(path, output_dir):
+                if path.stat().st_size <= max_file_bytes:
                     count += 1
     except Exception:
         pass
@@ -95,17 +96,17 @@ def _scan_file(path: Path, root: Path, max_file_bytes: int, fingerprint_key: byt
     else:
         return findings, debug_info + " → NO_CRED"
 
-def scan_tree(root: Path, max_file_bytes: int, fingerprint_key: bytes, max_workers: int = 8):
+def scan_tree(root: Path, max_file_bytes: int, fingerprint_key: bytes, max_workers: int = 8, output_dir: Path | None = None):
     findings: List[dict] = []
     root = root.resolve()
     
-    scannable_count = _count_scannable_files(root)
+    scannable_count = _count_scannable_files(root, max_file_bytes, output_dir)
     LOG.info(f'Starting credential scan on {scannable_count} scannable files', extra={'stage': 'scanning', 'scannable_files': scannable_count})
     debug_log(f"SCAN START: {scannable_count} files in {root.name}", "START")
     
     file_paths = []
     for path in root.rglob("*"):
-        if _should_scan_file(path):
+        if _should_scan_file(path, output_dir):
             file_paths.append(path)
     
     files_scanned = 0
@@ -170,7 +171,40 @@ def write_raw_credentials_file(credentials: List[dict], output_path: Path):
     debug_log(f"Raw credentials exported: {output_path} ({len(lines_set)} entries)", "RESULT")
     LOG.info(f"Raw credentials written: {len(lines_set)} unique credentials", extra={'stage': 'export', 'count': len(lines_set)})
 
-def extract_raw_credentials(root: Path, max_workers: int = 8) -> List[dict]:
+def _pair_key_secret(keys: list[tuple[int, str, str]], secrets: list[tuple[int, str, str]], region_pattern: re.Pattern[str], rel_path: str) -> list[dict]:
+    """Pair each access key with the nearest secret by line distance (not by index / tokens)."""
+    local_creds = []
+    used_secrets: set[int] = set()
+    for key_line, key, key_text in keys:
+        best_idx = None
+        best_dist = None
+        for idx, (sec_line, secret, sec_text) in enumerate(secrets):
+            if idx in used_secrets:
+                continue
+            dist = abs(sec_line - key_line)
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_idx = idx
+        if best_idx is None or best_dist is None or best_dist > 8:
+            continue
+        used_secrets.add(best_idx)
+        sec_line, secret, sec_text = secrets[best_idx]
+        region = "unknown"
+        for txt in (key_text, sec_text):
+            m = region_pattern.search(txt)
+            if m:
+                region = m.group(1).lower()
+                break
+        local_creds.append({
+            "access_key": key,
+            "secret_key": secret,
+            "region": region,
+            "file": rel_path,
+            "line": key_line,
+        })
+    return local_creds
+
+def extract_raw_credentials(root: Path, max_workers: int = 8, output_dir: Path | None = None) -> List[dict]:
     creds_dict: Dict[str, dict] = {}
     region_pattern = re.compile(
         r'\b(us-east-1|us-east-2|us-west-1|us-west-2|eu-west-1|eu-west-2|eu-central-1|'
@@ -185,7 +219,7 @@ def extract_raw_credentials(root: Path, max_workers: int = 8) -> List[dict]:
     
     file_paths = []
     for path in root.rglob("*"):
-        if _should_scan_file(path) and path.stat().st_size <= 1024 * 1024:
+        if _should_scan_file(path, output_dir) and path.stat().st_size <= 1024 * 1024:
             file_paths.append(path)
     
     scannable_count = len(file_paths)
@@ -194,12 +228,11 @@ def extract_raw_credentials(root: Path, max_workers: int = 8) -> List[dict]:
     debug_log(f"EXTRACT START: {scannable_count} files", "START")
     
     def _process_one(filepath: Path):
-        local_creds = []
         rel_path = str(filepath.relative_to(root))
         try:
             lines = filepath.read_text(encoding="utf-8", errors="replace").splitlines()
         except Exception:
-            return local_creds
+            return []
         
         keys_in_file = []
         secrets_in_file = []
@@ -209,29 +242,8 @@ def extract_raw_credentials(root: Path, max_workers: int = 8) -> List[dict]:
                 keys_in_file.append((line_no, match.group(1), line))
             for match in AWS_SECRET.finditer(line):
                 secrets_in_file.append((line_no, match.group(2), line))
-            for match in AWS_TOKEN.finditer(line):
-                secrets_in_file.append((line_no, match.group(2), line))
         
-        for i in range(min(len(keys_in_file), len(secrets_in_file))):
-            key_line, key, key_text = keys_in_file[i]
-            sec_line, secret, sec_text = secrets_in_file[i]
-            
-            region = "unknown"
-            for txt in (key_text, sec_text):
-                m = region_pattern.search(txt)
-                if m:
-                    region = m.group(1)
-                    break
-            
-            local_creds.append({
-                "access_key": key,
-                "secret_key": secret,
-                "region": region,
-                "file": rel_path,
-                "line": key_line,
-            })
-        
-        return local_creds
+        return _pair_key_secret(keys_in_file, secrets_in_file, region_pattern, rel_path)
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_process_one, fp): fp for fp in file_paths}

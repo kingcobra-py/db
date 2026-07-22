@@ -34,10 +34,63 @@ class DatabaseManager:
             with db:
                 yield db
 
+    def _migrate_job_uniqueness(self, db: sqlite3.Connection) -> None:
+        """Ensure uniqueness is (chat_id, message_id), not message_id alone."""
+        indexes = list(db.execute("PRAGMA index_list(jobs)"))
+        has_composite = False
+        for idx in indexes:
+            name = idx[1]
+            unique = idx[2]
+            cols = [row[2] for row in db.execute(f"PRAGMA index_info('{name}')")]
+            if unique and cols == ["chat_id", "message_id"]:
+                has_composite = True
+                break
+        if has_composite:
+            return
+        db.execute("DROP TABLE IF EXISTS jobs_migrated")
+        db.execute("""CREATE TABLE jobs_migrated(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,message_id INTEGER NOT NULL,
+            chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,input_files_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN('pending','running','completed','failed')),
+            attempts INTEGER NOT NULL DEFAULT 0,source TEXT NOT NULL DEFAULT 'telegram',
+            source_link TEXT,output_text TEXT,summary_json TEXT,summary_data TEXT,error TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,started_at TEXT,completed_at TEXT,
+            progress_stage TEXT,progress_done INTEGER NOT NULL DEFAULT 0,progress_total INTEGER NOT NULL DEFAULT 0,
+            progress_file TEXT,progress_index INTEGER NOT NULL DEFAULT 0,progress_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(chat_id, message_id))""")
+        cols = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
+        select_cols = [
+            "id", "message_id", "chat_id", "user_id", "input_files_json", "status", "attempts",
+            "source" if "source" in cols else "'telegram'",
+            "source_link" if "source_link" in cols else "NULL",
+            "output_text", "summary_json", "summary_data", "error",
+            "created_at", "started_at", "completed_at",
+            "progress_stage" if "progress_stage" in cols else "NULL",
+            "progress_done" if "progress_done" in cols else "0",
+            "progress_total" if "progress_total" in cols else "0",
+            "progress_file" if "progress_file" in cols else "NULL",
+            "progress_index" if "progress_index" in cols else "0",
+            "progress_count" if "progress_count" in cols else "0",
+            "updated_at",
+        ]
+        # Deduplicate by chat_id+message_id keeping newest id
+        db.execute(f"""INSERT OR IGNORE INTO jobs_migrated(
+            id,message_id,chat_id,user_id,input_files_json,status,attempts,source,source_link,
+            output_text,summary_json,summary_data,error,created_at,started_at,completed_at,
+            progress_stage,progress_done,progress_total,progress_file,progress_index,progress_count,updated_at)
+            SELECT {', '.join(select_cols)} FROM jobs
+            WHERE id IN (
+                SELECT MAX(id) FROM jobs GROUP BY chat_id, message_id
+            )""")
+        db.execute("DROP TABLE jobs")
+        db.execute("ALTER TABLE jobs_migrated RENAME TO jobs")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status,created_at)")
+
     def initialize(self):
         with self.connect() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS jobs(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,message_id INTEGER NOT NULL UNIQUE,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,message_id INTEGER NOT NULL,
                 chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,input_files_json TEXT NOT NULL,
                 status TEXT NOT NULL CHECK(status IN('pending','running','completed','failed')),
                 attempts INTEGER NOT NULL DEFAULT 0,source TEXT NOT NULL DEFAULT 'telegram',
@@ -45,7 +98,10 @@ class DatabaseManager:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,started_at TEXT,completed_at TEXT,
                 progress_stage TEXT,progress_done INTEGER NOT NULL DEFAULT 0,progress_total INTEGER NOT NULL DEFAULT 0,
                 progress_file TEXT,progress_index INTEGER NOT NULL DEFAULT 0,progress_count INTEGER NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(chat_id, message_id))""")
+            # Migrate legacy UNIQUE(message_id) schemas
+            self._migrate_job_uniqueness(db)
             columns = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
             if "source" not in columns: db.execute("ALTER TABLE jobs ADD COLUMN source TEXT NOT NULL DEFAULT 'telegram'")
             if "source_link" not in columns: db.execute("ALTER TABLE jobs ADD COLUMN source_link TEXT")
@@ -59,22 +115,22 @@ class DatabaseManager:
             ):
                 if col not in columns: db.execute(f"ALTER TABLE jobs ADD COLUMN {ddl}")
             db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status,created_at)")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_chat_message ON jobs(chat_id, message_id)")
             db.execute('''CREATE TABLE IF NOT EXISTS extracted_credentials (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER, access_key TEXT, 
                 secret_key TEXT, region TEXT, file_path TEXT, line_number INTEGER,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-            db.commit()
 
     def _job(self, r): return Job(int(r['id']),int(r['message_id']),int(r['chat_id']),int(r['user_id']),json.loads(r['input_files_json']),str(r['status']),int(r['attempts']))
 
     def create_job(self,message_id,chat_id,user_id,files,source='telegram',source_link=None):
         with self.connect() as db:
             db.execute("""INSERT INTO jobs(message_id,chat_id,user_id,input_files_json,status,source,source_link)
-                VALUES(?,?,?,?,'pending',?,?) ON CONFLICT(message_id) DO UPDATE SET
+                VALUES(?,?,?,?,'pending',?,?) ON CONFLICT(chat_id, message_id) DO UPDATE SET
                 input_files_json=excluded.input_files_json,status=CASE WHEN jobs.status='completed' THEN jobs.status ELSE 'pending' END,
                 source=excluded.source,source_link=excluded.source_link,updated_at=CURRENT_TIMESTAMP""",
                 (message_id,chat_id,user_id,json.dumps(files),source,source_link))
-            return int(db.execute("SELECT id FROM jobs WHERE message_id=?",(message_id,)).fetchone()['id'])
+            return int(db.execute("SELECT id FROM jobs WHERE chat_id=? AND message_id=?",(chat_id,message_id)).fetchone()['id'])
 
     def get_job(self,job_id):
         with self.connect() as db:
@@ -132,6 +188,33 @@ class DatabaseManager:
             r=db.execute(f"SELECT {column} AS path FROM jobs WHERE id=? AND status='completed'",(job_id,)).fetchone()
             return str(r['path']) if r and r['path'] else None
 
+    def summary_data_for_job(self, job_id: int) -> dict[str, Any] | None:
+        with self.connect() as db:
+            r = db.execute(
+                "SELECT summary_data, summary_json FROM jobs WHERE id=? AND status='completed'",
+                (job_id,),
+            ).fetchone()
+        if not r:
+            return None
+        if r["summary_data"]:
+            try:
+                data = json.loads(r["summary_data"])
+                if isinstance(data, dict):
+                    return data
+            except (TypeError, ValueError):
+                pass
+        path_value = r["summary_json"]
+        if path_value:
+            try:
+                path = Path(path_value)
+                if path.is_file():
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        return data
+            except (OSError, TypeError, ValueError):
+                pass
+        return None
+
     def get_total_compressed_size(self) -> int:
         """Sum the on-disk size of every input (compressed) file referenced by any job."""
         with self.connect() as db:
@@ -149,7 +232,7 @@ class DatabaseManager:
         """Remove everything in inbox_dir and work_dir, and clear output_dir.
 
         Returns a summary dict with the number of files removed and bytes freed.
-        This does not touch job rows in the database, only files on disk.
+        Also clears output path pointers on job rows so downloads do not 404 on deleted files.
         """
         files_removed=0; bytes_freed=0
         for directory in (self.inbox_dir, self.work_dir, self.output_dir):
@@ -165,6 +248,11 @@ class DatabaseManager:
                                 bytes_freed+=sub.stat().st_size; files_removed+=1
                         shutil.rmtree(entry, ignore_errors=True)
                 except OSError: continue
+        with self.connect() as db:
+            db.execute(
+                "UPDATE jobs SET output_text=NULL, summary_json=NULL, updated_at=CURRENT_TIMESTAMP "
+                "WHERE output_text IS NOT NULL OR summary_json IS NOT NULL"
+            )
         return {'files_removed': files_removed, 'bytes_freed': bytes_freed}
 
     def _read_config(self) -> dict[str, Any]:
@@ -198,13 +286,18 @@ class DatabaseManager:
                     (job_id, cred['access_key'], cred['secret_key'], cred.get('region', 'unknown'),
                      cred.get('file', ''), cred.get('line', 0)))
 
-    def get_all_credentials(self) -> list:
+    def get_all_credentials(self, *, mask_secrets: bool = False) -> list:
         with self.connect() as db:
             cursor = db.execute(
                 '''SELECT access_key, secret_key, region, created_at 
                    FROM extracted_credentials ORDER BY created_at DESC''')
-            return [{'access_key': r[0], 'secret_key': r[1], 'region': r[2], 'created_at': r[3]} 
-                    for r in cursor]
+            rows = []
+            for r in cursor:
+                secret = r[1] or ''
+                if mask_secrets and secret:
+                    secret = secret[:16] + ('…' if len(secret) > 16 else '')
+                rows.append({'access_key': r[0], 'secret_key': secret, 'region': r[2], 'created_at': r[3]})
+            return rows
 
     def clear_all_credentials(self) -> int:
         with self.connect() as db:
@@ -215,5 +308,7 @@ class DatabaseManager:
         """Mark all pending and running jobs as failed. Returns count updated."""
         with self.connect() as db:
             cursor = db.execute(
-                "UPDATE jobs SET status = 'failed' WHERE status IN ('pending', 'running')")
+                "UPDATE jobs SET status='failed', error='Stopped by operator', "
+                "completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP "
+                "WHERE status IN ('pending', 'running')")
             return cursor.rowcount
