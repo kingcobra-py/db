@@ -148,3 +148,26 @@
     fetchLogs();
   }
 })();
+
+// Credentials poller
+(function() {
+  function load() {
+    fetch('/credentials', { credentials: 'same-origin', headers: {'Accept': 'application/json'} })
+    .then(r => r.ok ? r.json() : null).then(creds => {
+      if (!creds) return;
+      const c = document.getElementById('credentials-list');
+      if (!c) return;
+      if (creds.length === 0) {
+        c.innerHTML = '<div class="empty">No credentials yet.</div>';
+        document.getElementById('export-btn').disabled = true;
+        document.getElementById('clear-btn').disabled = true;
+        return;
+      }
+      c.innerHTML = creds.map(cr => `<div class="credential-row">${cr.access_key}:${cr.secret_key}:${cr.region}</div>`).join('');
+      document.getElementById('export-btn').disabled = false;
+      document.getElementById('clear-btn').disabled = false;
+    });
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", load);
+  else load();
+})();

@@ -33,4 +33,23 @@
   </div>
   <p class="muted">Last 30 log entries. Auto-refreshes every 5 seconds.</p>
 </section>
+<section class="panel credentials-panel">
+  <div class="panel-head">
+    <div><p class="eyebrow">Extracted</p><h2>AWS Credentials</h2></div>
+    <span class="icon-box">🔐</span>
+  </div>
+  <p class="muted">All extracted credentials, most recent first.</p>
+  <div class="credentials-container">
+    <div id="credentials-list" class="credentials-list">
+      <div class="empty">No credentials yet.</div>
+    </div>
+  </div>
+  <div class="credentials-actions">
+    <a href="/credentials/export" id="export-btn" disabled>📥 Export</a>
+    <form method="post" action="/credentials/clear-all" data-confirm="Delete ALL?">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="danger" type="submit" id="clear-btn" disabled>🗑 Clear</button>
+    </form>
+  </div>
+</section>
 <footer>Only inspect channels and files you own or are authorized to access.</footer></main></body></html>
