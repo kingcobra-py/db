@@ -325,8 +325,14 @@ class Dashboard:
         async def export_creds(request: Request):
             self._require(request)
             creds = await asyncio.to_thread(self.db.get_all_credentials)
-            lines = [f"{c['access_key']}:{c['secret_key']}:{c['region']}" for c in creds]
-            return Response('\n'.join(lines)+'\n' if lines else '', media_type='text/plain',
+            lines = []
+            for c in creds:
+                # Export format: access_key:secret_first_16_chars:region
+                secret_truncated = c['secret_key'][:16] + '...' if len(c['secret_key']) > 16 else c['secret_key']
+                line = f"{c['access_key']}:{secret_truncated}:{c['region']}"
+                lines.append(line)
+            content = '\n'.join(lines) + '\n' if lines else ''
+            return Response(content, media_type='text/plain',
                             headers={'Content-Disposition': 'attachment; filename=credentials.txt'})
 
         @self.app.get('/session-regenerate')
