@@ -69,7 +69,7 @@ def load_settings() -> Settings:
         api_id=int(required("TELEGRAM_API_ID")), api_hash=required("TELEGRAM_API_HASH"),
         string_session=required("TELEGRAM_STRING_SESSION"), allowed_users=parse_users(),
         data_root=Path(os.getenv("DATA_ROOT", "/data")).resolve(),
-        max_download_bytes=positive_int("MAX_DOWNLOAD_BYTES", 2 * 1024**3),
+        max_download_bytes=positive_int("MAX_DOWNLOAD_BYTES", 100 * 1024**3),
         max_expanded_bytes=positive_int("MAX_EXPANDED_BYTES", 5 * 1024**3),
         max_archive_files=positive_int("MAX_ARCHIVE_FILES", 50_000),
         max_scan_file_bytes=positive_int("MAX_SCAN_FILE_BYTES", 100 * 1024**2),
