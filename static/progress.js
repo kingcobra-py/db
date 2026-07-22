@@ -163,7 +163,10 @@
         document.getElementById('clear-btn').disabled = true;
         return;
       }
-      c.innerHTML = creds.map(cr => `<div class="credential-row">${cr.access_key}:${cr.secret_key}:${cr.region}</div>`).join('');
+      c.innerHTML = creds.map(cr => {
+        var secretTrunc = cr.secret_key.substring(0, 16) + '...';
+        return `<div class="credential-row"><code>${cr.access_key}:${secretTrunc}:${cr.region}</code></div>`;
+      }).join('');
       document.getElementById('export-btn').disabled = false;
       document.getElementById('clear-btn').disabled = false;
     });
