@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -77,6 +75,27 @@ class SecurityTests(unittest.TestCase):
             restored = db.restore_interrupted_jobs()
             self.assertEqual([j.id for j in restored], [job_id])
             self.assertEqual(restored[0].status, "pending")
+
+    def test_same_message_id_different_chats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            a = db.create_job(10, 100, 1, ["a.zip"])
+            b = db.create_job(10, 200, 1, ["b.zip"])
+            self.assertNotEqual(a, b)
+            self.assertEqual(db.get_job(a).chat_id, 100)
+            self.assertEqual(db.get_job(b).chat_id, 200)
+
+    def test_summary_data_for_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            job_id = db.create_job(5, 1, 1, ["x.zip"])
+            summary = {"files_scanned": 3, "findings": 1, "by_type": {"aws_access_key_id": 1}}
+            db.mark_completed(job_id, "/tmp/report.txt", "/tmp/summary.json", summary)
+            data = db.summary_data_for_job(job_id)
+            self.assertEqual(data["files_scanned"], 3)
+            self.assertEqual(data["findings"], 1)
 
 
 if __name__ == "__main__":

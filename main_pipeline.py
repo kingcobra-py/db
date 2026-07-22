@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 import uvicorn
 from telethon import TelegramClient, events
-from telethon.errors import AuthKeyDuplicatedError
+from telethon.errors import AuthKeyDuplicatedError, FloodWaitError
 from telethon.sessions import StringSession
 from telethon.tl.types import PeerChannel
 from config import Settings, load_settings
@@ -31,13 +31,24 @@ class QueueItem: job_id:int
 
 class Pipeline:
     def __init__(self,s:Settings):
-        self.s=s; self.db=DatabaseManager(s.database_path,s.inbox_dir,s.work_dir,s.output_dir); self.queue:asyncio.Queue[QueueItem]=asyncio.Queue(maxsize=100)
+        self.s=s
+        self.db=DatabaseManager(s.database_path,s.inbox_dir,s.work_dir,s.output_dir)
+        self.queue:asyncio.Queue[QueueItem]=asyncio.Queue(maxsize=100)
+        self.ingest_queue:asyncio.Queue[str]=asyncio.Queue(maxsize=500)
         self._lock_file=None
         self._acquire_session_lock()
         self.client=TelegramClient(StringSession(self._load_session_string()),s.api_id,s.api_hash)
         self.passwords=PasswordStore(s.password_store_path,s.password_encryption_key)
         self.extractor=ArchiveProcessor(s,self.passwords.list_plain)
-        self.semaphore=asyncio.Semaphore(s.extraction_workers)
+        workers=max(1, min(24, self.db.get_extraction_workers(s.extraction_workers)))
+        self.semaphore=asyncio.Semaphore(workers)
+        self._stop_requested=asyncio.Event()
+        self._active_tasks:set[asyncio.Task]=set()
+
+    def set_extraction_workers(self, workers: int) -> None:
+        workers = max(1, min(24, int(workers)))
+        self.semaphore = asyncio.Semaphore(workers)
+        LOG.info('Extraction semaphore updated', extra={'workers': workers, 'stage': 'config'})
 
     def _acquire_session_lock(self,timeout_seconds:float=30.0)->None:
         """Acquire an exclusive OS-level lock on the session lock file so that
@@ -80,13 +91,17 @@ class Pipeline:
         if path.exists():
             content=path.read_text(encoding='utf-8').strip()
             if content: return content
+        stored=self.db.get_config('TELEGRAM_STRING_SESSION')
+        if isinstance(stored, str) and stored.strip():
+            return stored.strip()
         return self.s.string_session
 
-    def _persist_session_string(self)->None:
+    def _persist_session_string(self, session_string: str | None = None)->None:
         try:
-            session_string=self.client.session.save()
+            session_string=session_string or self.client.session.save()
             self.s.session_file_path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
             self.s.session_file_path.write_text(session_string,encoding='utf-8')
+            self.db.store_config('TELEGRAM_STRING_SESSION', session_string)
         except Exception:
             LOG.exception('Failed to persist Telegram session file',extra={'stage':'startup'})
 
@@ -125,6 +140,7 @@ class Pipeline:
         for unit in ('B','KB','MB','GB'):
             if n<1024 or unit=='GB': return f'{n:.1f} {unit}'
             n/=1024
+        return f'{n:.1f} GB'
 
     def _make_progress_callback(self,progress_message,job_id:int,index:int,file_count:int,filename:str):
         """Telethon progress_callback: writes progress to the DB (for web polling)
@@ -165,7 +181,14 @@ class Pipeline:
         job_id=await asyncio.to_thread(self.db.create_job,job_key,chat_id,user_id,[],source,source_link)
         files=[]; total=0
         try:
+            if self._stop_requested.is_set():
+                raise ValueError('Stopped by operator')
+            available = shutil.disk_usage(self.s.inbox_dir).free
+            if available <= self.s.min_free_bytes:
+                raise ValueError('Insufficient disk space before download')
             for index,message in enumerate(media_messages,1):
+                if self._stop_requested.is_set():
+                    raise ValueError('Stopped by operator')
                 filename=Path(getattr(message.file,'name',None) or f'upload-{index}.bin').name
                 destination=inbox/filename
                 if destination.exists(): destination=inbox/f'{index}-{filename}'
@@ -174,10 +197,13 @@ class Pipeline:
                     file=str(destination),
                     progress_callback=self._make_progress_callback(progress,job_id,index,file_count,filename),
                 )
-                total+=destination.stat().st_size
+                size=destination.stat().st_size
+                total+=size
+                if total > self.s.max_download_bytes:
+                    raise ValueError(f'Download exceeds MAX_DOWNLOAD_BYTES ({self.s.max_download_bytes} bytes)')
                 available = shutil.disk_usage(self.s.inbox_dir).free
                 if available <= self.s.min_free_bytes:
-                    raise ValueError(f'Insufficient disk space')
+                    raise ValueError('Insufficient disk space')
                 files.append(str(destination))
             if not files: raise ValueError('Telegram message has no downloadable media')
             # Fill in the downloaded files and re-queue as pending for the worker.
@@ -185,10 +211,14 @@ class Pipeline:
             await asyncio.to_thread(self.db.clear_progress,job_id)
             await self.queue.put(QueueItem(job_id))
             if notify: await self.notify(chat_id,f'✅ Downloaded {len(files)} file(s); queued.',messages[0].id)
+            LOG.info('Download finished and queued for extraction', extra={'job_id': job_id, 'message_id': job_key, 'stage': 'download'})
             return job_id
         except Exception:
             await asyncio.to_thread(self.db.clear_progress,job_id)
             shutil.rmtree(inbox,ignore_errors=True); raise
+
+    async def enqueue_channel_link(self, url: str) -> None:
+        await self.ingest_queue.put(url)
 
     async def ingest_channel_link(self,url:str):
         job_key=self.web_job_id(url)
@@ -199,14 +229,36 @@ class Pipeline:
             if not message: raise ValueError('Message is unavailable to the signed-in Telegram account')
             messages=[message]
             if message.grouped_id:
-                nearby=await self.client.get_messages(entity,limit=40,offset_id=message_id+20)
+                # Pull a wider nearby window so large albums are not truncated.
+                nearby=await self.client.get_messages(entity,limit=100,offset_id=message_id+50)
                 messages=sorted({m.id:m for m in [message,*nearby] if m and m.grouped_id==message.grouped_id and m.media}.values(),key=lambda m:m.id)
             await self.queue_messages(messages=messages,job_key=job_key,chat_id=0,user_id=0,source='channel-link',source_link=url,notify=False)
             LOG.info('Channel link queued',extra={'message_id':job_key,'stage':'web-ingest'})
+        except FloodWaitError as exc:
+            LOG.warning('Flood wait during channel ingest; sleeping %ss', exc.seconds, extra={'message_id':job_key,'stage':'web-ingest'})
+            await asyncio.sleep(exc.seconds + 1)
+            job_id=await asyncio.to_thread(self.db.create_job,job_key,0,0,[],'channel-link',url)
+            await asyncio.to_thread(self.db.mark_failed,job_id,f'FloodWaitError: retry after {exc.seconds}s')
         except Exception as exc:
             LOG.exception('Channel link ingest failed',extra={'message_id':job_key,'stage':'web-ingest'})
             job_id=await asyncio.to_thread(self.db.create_job,job_key,0,0,[],'channel-link',url)
             await asyncio.to_thread(self.db.mark_failed,job_id,f'{type(exc).__name__}: {exc}')
+
+    async def ingest_worker(self):
+        """Serialize channel-link downloads to avoid Telegram flood / retry storms."""
+        while True:
+            url = await self.ingest_queue.get()
+            try:
+                if self._stop_requested.is_set():
+                    job_key = self.web_job_id(url)
+                    job_id = await asyncio.to_thread(self.db.create_job, job_key, 0, 0, [], 'channel-link', url)
+                    await asyncio.to_thread(self.db.mark_failed, job_id, 'Stopped by operator')
+                else:
+                    await self.ingest_channel_link(url)
+                    # Small pacing gap between channel fetches.
+                    await asyncio.sleep(1.25)
+            finally:
+                self.ingest_queue.task_done()
 
     def register(self):
         @self.client.on(events.Album)
@@ -224,6 +276,12 @@ class Pipeline:
             except Exception as exc: await self.notify(int(event.chat_id),f'❌ Download failed: {type(exc).__name__}: {exc}',event.message.id)
 
     async def process(self,job:Job):
+        if self._stop_requested.is_set():
+            await asyncio.to_thread(self.db.mark_failed, job.id, 'Stopped by operator')
+            return
+        current = await asyncio.to_thread(self.db.get_job, job.id)
+        if not current or current.status not in {'pending', 'running'}:
+            return
         await asyncio.to_thread(self.db.mark_running,job.id)
         await self.notify(job.chat_id,'🧰 Validating and extracting archive…',job.message_id)
         try:
@@ -233,7 +291,9 @@ class Pipeline:
             await self.notify(job.chat_id,'🔎 Scanning for credentials in extracted files…',job.message_id)
             LOG.info('Starting credential scan',extra={'job_id':job.id,'message_id':job.message_id,'stage':'processing'})
             
-            findings,summary=await asyncio.to_thread(scan_tree,root,self.s.max_scan_file_bytes,self.s.fingerprint_key)
+            findings,summary=await asyncio.to_thread(
+                scan_tree, root, self.s.max_scan_file_bytes, self.s.fingerprint_key, 8, self.s.output_dir
+            )
             text,summary_json=await asyncio.to_thread(write_results,self.s.output_dir,job.message_id,findings,summary)
             await asyncio.to_thread(self.db.mark_completed,job.id,str(text),str(summary_json),summary)
             
@@ -244,7 +304,7 @@ class Pipeline:
             
             # Extract raw credentials and send to Telegram
             await self.notify(job.chat_id,'🔑 Extracting raw AWS credentials…',job.message_id)
-            raw_creds=await asyncio.to_thread(extract_raw_credentials,root)
+            raw_creds=await asyncio.to_thread(extract_raw_credentials, root, 8, self.s.output_dir)
             
             if raw_creds:
                 await asyncio.to_thread(self.db.save_credentials,job.id,raw_creds)
@@ -282,14 +342,31 @@ class Pipeline:
             await asyncio.to_thread(self.db.mark_failed,job.id,f'{type(exc).__name__}: {exc}')
             await self.notify(job.chat_id,f'❌ Processing failed: {type(exc).__name__}: {exc}',job.message_id)
 
+    async def _run_job(self, item: QueueItem):
+        try:
+            job=await asyncio.to_thread(self.db.get_job,item.job_id)
+            if job and job.status in {'pending','running'}:
+                async with self.semaphore:
+                    await self.process(job)
+        finally:
+            self.queue.task_done()
+
     async def worker(self):
         while True:
             item=await self.queue.get()
-            try:
-                job=await asyncio.to_thread(self.db.get_job,item.job_id)
-                if job and job.status in {'pending','running'}:
-                    async with self.semaphore: await self.process(job)
-            finally: self.queue.task_done()
+            task=asyncio.create_task(self._run_job(item), name=f'job-{item.job_id}')
+            self._active_tasks.add(task)
+            task.add_done_callback(self._active_tasks.discard)
+
+    async def request_stop_all(self) -> int:
+        self._stop_requested.set()
+        count = await asyncio.to_thread(self.db.stop_all_jobs)
+        for task in list(self._active_tasks):
+            task.cancel()
+        # Allow new work after the stop request has been applied.
+        self._stop_requested.clear()
+        LOG.info('Stop-all requested', extra={'stage': 'control', 'stopped': count})
+        return count
 
     async def run(self):
         await asyncio.to_thread(self.db.initialize); self.register()
@@ -304,16 +381,21 @@ class Pipeline:
         for job in await asyncio.to_thread(self.db.restore_interrupted_jobs): await self.queue.put(QueueItem(job.id))
         dashboard=Dashboard(self.s,self.db,self.passwords,self)
         server=uvicorn.Server(uvicorn.Config(dashboard.app,host=self.s.host,port=self.s.port,log_config=None,access_log=False))
-        worker=asyncio.create_task(self.worker(),name='single-job-worker'); web=asyncio.create_task(server.serve(),name='web-dashboard')
-        LOG.info('Telegram scanner and web dashboard started')
+        worker=asyncio.create_task(self.worker(),name='job-dispatcher')
+        ingest=asyncio.create_task(self.ingest_worker(),name='channel-ingest-worker')
+        web=asyncio.create_task(server.serve(),name='web-dashboard')
+        LOG.info('Telegram scanner and web dashboard started', extra={'stage': 'startup'})
         try: await self.client.run_until_disconnected()
         finally:
-            server.should_exit=True; worker.cancel(); await asyncio.gather(worker,web,return_exceptions=True); await self.client.disconnect()
+            server.should_exit=True
+            worker.cancel(); ingest.cancel()
+            await asyncio.gather(worker,ingest,web,return_exceptions=True)
+            await self.client.disconnect()
             self._release_session_lock()
 
 async def main():
     s = load_settings()
-    configure_logging(s.log_level)
+    configure_logging(s.log_level, s.data_root / 'activity-logs.json')
     pipeline = Pipeline(s)
     loop = asyncio.get_running_loop()
 

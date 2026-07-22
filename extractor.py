@@ -118,10 +118,26 @@ class ArchiveProcessor:
     def _password_arg(password: str | None) -> str:
         return "-p" if password is None else f"-p{password}"
 
+    @staticmethod
+    def _summarize_7z_output(output: str, limit: int = 240) -> str:
+        text = " ".join(line.strip() for line in (output or "").splitlines() if line.strip())
+        if not text:
+            return "no 7z output"
+        lowered = text.lower()
+        if "wrong password" in lowered:
+            return "wrong password"
+        if "cannot open" in lowered and "password" in lowered:
+            return "password required or incorrect"
+        if "unsupported method" in lowered:
+            return "unsupported compression method"
+        if "is not archive" in lowered or "can not open the file as archive" in lowered:
+            return "not a valid archive"
+        return text[:limit]
+
     def _inspect(self, archive: Path, password: str | None) -> tuple[int, int]:
         result = self._run(["l", "-slt", "-bd", "-y", self._password_arg(password), str(archive)])
         if result.returncode != 0:
-            raise ExtractionError("Archive listing failed")
+            raise ExtractionError(f"Archive listing failed: {self._summarize_7z_output(result.stdout)}")
         count = expanded = 0
         in_entries = False
         is_directory = False
@@ -189,13 +205,20 @@ class ArchiveProcessor:
                 self._post_validate(destination)
                 return  # SUCCESS: No password needed
 
-            last_error = "archive needs password"
+            last_error = self._summarize_7z_output(result.stdout) or "archive needs password"
         except (ExtractionError, subprocess.TimeoutExpired) as exc:
             last_error = str(exc) or type(exc).__name__
 
         # Second pass: archive needs password, try each one on the archive
+        if len(passwords) <= 1:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise ExtractionError(
+                f"Could not safely extract {archive.name}: {last_error} "
+                "(no archive passwords configured)"
+            )
+
         for password in passwords[1:]:  # Skip None, already tried
-            destination_temp = destination.parent / f"{destination.name}_temp_{id(password)}"
+            destination_temp = destination.parent / f"{destination.name}_temp_{abs(hash(password)) & 0xFFFFFFFF:x}"
             try:
                 shutil.rmtree(destination_temp, ignore_errors=True)
                 destination_temp.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -215,7 +238,7 @@ class ArchiveProcessor:
                     destination_temp.rename(destination)
                     return  # SUCCESS with this password
 
-                last_error = "wrong password"
+                last_error = self._summarize_7z_output(result.stdout) or "wrong password"
             except (ExtractionError, subprocess.TimeoutExpired) as exc:
                 last_error = str(exc) or type(exc).__name__
             finally:
