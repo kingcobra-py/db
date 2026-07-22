@@ -9,13 +9,6 @@ from pathlib import Path
 
 LOG = logging.getLogger('credentials')
 
-# Which folders are considered valid
-FOLDER_PATTERN_OLD = re.compile(r"soft.*azure.*aws", re.IGNORECASE)
-FOLDER_PATTERN_NEW = re.compile(r"applications.*azure", re.IGNORECASE)
-
-# Only files named exactly 'credentials' (case‑insensitive)
-TARGET_NAME = "credentials"
-
 # Regex patterns (same as before, plus session token)
 AWS_ID = re.compile(r"(?<![A-Z0-9])((?:AKIA|ASIA|AIDA|AROA)[A-Z0-9]{16})(?![A-Z0-9])")
 AWS_SECRET = re.compile(r'''(?ix)\b(aws_secret_access_key|secret_access_key|aws_secret_key)\b\s*[:=,]\s*[\"']?([A-Za-z0-9/+=]{40,128})[\"']?''')
@@ -191,47 +184,48 @@ def extract_raw_credentials(root: Path) -> list[dict]:
         except Exception:
             continue
         
-        # Extract access keys with line context
-        access_keys = {}
+        # Extract access keys in file order (sequential occurrence)
+        keys_in_file = []
         for line_no, line in enumerate(lines, 1):
             for match in AWS_ID.finditer(line):
                 key = match.group(1)
-                if key not in access_keys:
-                    access_keys[key] = (rel_path, line_no, line)
+                keys_in_file.append((line_no, key, line))
         
-        # Extract secrets with line context
-        secrets = {}
+        # Extract secrets/tokens in file order (sequential occurrence)
+        secrets_in_file = []
         for line_no, line in enumerate(lines, 1):
             for match in AWS_SECRET.finditer(line):
                 secret = match.group(2)
-                if secret not in secrets:
-                    secrets[secret] = (rel_path, line_no, line)
+                secrets_in_file.append((line_no, secret, line))
             for match in AWS_TOKEN.finditer(line):
                 token = match.group(2)
-                if token not in secrets:
-                    secrets[token] = (rel_path, line_no, line)
+                secrets_in_file.append((line_no, token, line))
         
-        # Combine keys with secrets
-        for key, (key_file, key_line, key_line_text) in access_keys.items():
-            for secret, (sec_file, sec_line, sec_line_text) in secrets.items():
-                region = "unknown"
-                for line_text in (key_line_text, sec_line_text):
-                    m = region_pattern.search(line_text)
-                    if m:
-                        region = m.group(1)
-                        break
-                
-                region_counts[region] = region_counts.get(region, 0) + 1
-                
-                if key not in creds_dict:
-                    creds_dict[key] = {
-                        "access_key": key,
-                        "secret_key": secret,
-                        "region": region,
-                        "file": key_file,
-                        "line": key_line,
-                    }
-                    files_with_creds.add(key_file)
+        # Pair keys and secrets sequentially: 1st key with 1st secret, etc.
+        # This avoids the cartesian-product false positives of pairing
+        # every key with every secret found in a file.
+        for i in range(min(len(keys_in_file), len(secrets_in_file))):
+            key_line, key, key_line_text = keys_in_file[i]
+            sec_line, secret, sec_line_text = secrets_in_file[i]
+            
+            region = "unknown"
+            for line_text in (key_line_text, sec_line_text):
+                m = region_pattern.search(line_text)
+                if m:
+                    region = m.group(1)
+                    break
+            
+            region_counts[region] = region_counts.get(region, 0) + 1
+            
+            if key not in creds_dict:
+                creds_dict[key] = {
+                    "access_key": key,
+                    "secret_key": secret,
+                    "region": region,
+                    "file": rel_path,
+                    "line": key_line,
+                }
+                files_with_creds.add(rel_path)
     
     result = list(creds_dict.values())
     LOG.info(f'Credential extraction complete: {len(result)} credentials extracted from {len(files_with_creds)} files. Regions: {region_counts}',
