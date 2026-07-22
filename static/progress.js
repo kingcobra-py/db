@@ -1,176 +1,27 @@
-// Download-progress poller for the Archive Scanner dashboard.
-// Loaded as an external script to comply with the CSP (script-src 'self').
-// It finds job rows that are still active, polls /jobs/<id>/progress, and
-// updates a per-row progress bar. When a job leaves the download stage it
-// reloads the page so the rest of the row (status, output links) refreshes.
-(function () {
-  "use strict";
-
-  var POLL_MS = 1500;
-  var ACTIVE = { pending: 1, running: 1 }; // statuses worth polling
-
-  function human(n) {
-    if (!n || n < 0) n = 0;
-    var units = ["B", "KB", "MB", "GB"], i = 0;
-    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
-    return n.toFixed(1) + " " + units[i];
-  }
-
-  function rows() {
-    var out = [], nodes = document.querySelectorAll("tr[data-job-id]");
-    for (var i = 0; i < nodes.length; i++) {
-      var status = nodes[i].getAttribute("data-job-status");
-      if (ACTIVE[status]) out.push(nodes[i]);
-    }
-    return out;
-  }
-
-  function render(row, data) {
-    var box = row.querySelector("[data-progress]");
-    if (!box) return;
-    var isDownloading = data.stage === "downloading" && data.total > 0;
-    if (!isDownloading) { box.hidden = true; return; }
-    box.hidden = false;
-    var fill = box.querySelector(".dl-bar > i");
-    var label = box.querySelector(".dl-label");
-    if (fill) fill.style.width = data.percent + "%";
-    if (label) {
-      var name = data.file || "file";
-      var pos = (data.index && data.count) ? (" (" + data.index + "/" + data.count + ")") : "";
-      label.textContent = "\u2b07 " + name + pos + " \u2014 " + data.percent + "%  " +
-        human(data.done) + " / " + human(data.total);
-    }
-  }
-
-  function pollOne(row) {
-    var id = row.getAttribute("data-job-id");
-    return fetch("/jobs/" + encodeURIComponent(id) + "/progress", {
-      credentials: "same-origin", headers: { "Accept": "application/json" }
-    }).then(function (r) {
-      if (!r.ok) throw new Error("http " + r.status);
-      return r.json();
-    }).then(function (data) {
-      render(row, data);
-      // If the server now reports a status this row didn't start with, the job
-      // moved on (queued/completed/failed): refresh once to update the table.
-      var started = row.getAttribute("data-job-status");
-      if (data.status && data.status !== started && data.stage !== "downloading") {
-        return "changed";
-      }
-      return "ok";
-    }).catch(function () { return "ok"; });
-  }
-
-  function tick() {
-    var active = rows();
-    if (!active.length) return; // nothing to poll; stop the loop
-    Promise.all(active.map(pollOne)).then(function (results) {
-      if (results.indexOf("changed") !== -1) {
-        window.location.reload();
-        return;
-      }
-      window.setTimeout(tick, POLL_MS);
-    });
-  }
-
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", tick);
-  } else {
-    tick();
-  }
-
-  // Load scan metrics for completed jobs
-  function loadScanMetrics() {
-    document.querySelectorAll('tr[data-job-status="completed"]').forEach(function(row) {
-      var jobId = row.getAttribute('data-job-id');
-      fetch('/jobs/' + encodeURIComponent(jobId) + '/scan-metrics', {
-        credentials: 'same-origin',
-        headers: { 'Accept': 'application/json' }
-      }).then(function (r) {
-        if (!r.ok) return;
-        return r.json();
-      }).then(function (data) {
-        if (!data) return;
-        var filesEl = document.getElementById('files-' + jobId);
-        var findingsEl = document.getElementById('findings-' + jobId);
-        if (filesEl) filesEl.textContent = data.files_scanned;
-        if (findingsEl) findingsEl.textContent = data.findings;
-      }).catch(function () {});
-    });
-  }
-
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", loadScanMetrics);
-  } else {
-    loadScanMetrics();
-  }
+// Live dashboard updates. Kept external to comply with script-src 'self'.
+(function(){
+  'use strict';
+  var POLL_MS=1500;
+  var ACTIVE={pending:1,running:1};
+  function human(n){if(!n||n<0)n=0;var units=['B','KB','MB','GB'],i=0;while(n>=1024&&i<units.length-1){n/=1024;i++;}return n.toFixed(1)+' '+units[i];}
+  function rows(){return Array.prototype.filter.call(document.querySelectorAll('[data-job-id]'),function(node){return ACTIVE[node.getAttribute('data-job-status')];});}
+  function render(row,data){var box=row.querySelector('[data-progress]');if(!box)return;var downloading=data.stage==='downloading'&&data.total>0;if(!downloading){box.hidden=true;return;}box.hidden=false;var fill=box.querySelector('.dl-bar > i');var label=box.querySelector('.dl-label');if(fill)fill.style.width=Math.max(0,Math.min(100,data.percent||0))+'%';if(label){var name=data.file||'file';var pos=(data.index&&data.count)?' ('+data.index+'/'+data.count+')':'';label.textContent=name+pos+' · '+data.percent+'% · '+human(data.done)+' / '+human(data.total);}}
+  function pollOne(row){var id=row.getAttribute('data-job-id');return fetch('/jobs/'+encodeURIComponent(id)+'/progress',{credentials:'same-origin',headers:{Accept:'application/json'}}).then(function(r){if(!r.ok)throw new Error('http '+r.status);return r.json();}).then(function(data){render(row,data);var started=row.getAttribute('data-job-status');return data.status&&data.status!==started&&data.stage!=='downloading'?'changed':'ok';}).catch(function(){return'ok';});}
+  function tick(){var active=rows();if(!active.length)return;Promise.all(active.map(pollOne)).then(function(results){if(results.indexOf('changed')!==-1){window.location.reload();return;}window.setTimeout(tick,POLL_MS);});}
+  function loadScanMetrics(){document.querySelectorAll('[data-job-status="completed"]').forEach(function(row){var id=row.getAttribute('data-job-id');fetch('/jobs/'+encodeURIComponent(id)+'/scan-metrics',{credentials:'same-origin',headers:{Accept:'application/json'}}).then(function(r){return r.ok?r.json():null;}).then(function(data){if(!data)return;var files=document.getElementById('files-'+id);var findings=document.getElementById('findings-'+id);if(files)files.textContent=data.files_scanned;if(findings)findings.textContent=data.findings;}).catch(function(){});});}
+  function start(){tick();loadScanMetrics();}
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start);else start();
 })();
 
-// Log poller for activity logs
-(function logPoller() {
-  var LOG_POLL_MS = 5000;
-  var lastLogTime = 0;
-
-  function fetchLogs() {
-    fetch('/logs', {
-      credentials: 'same-origin',
-      headers: { 'Accept': 'application/json' }
-    }).then(function(r) {
-      if (!r.ok) return;
-      return r.json();
-    }).then(function(logs) {
-      if (!logs || !Array.isArray(logs)) return;
-      var container = document.getElementById('logs-list');
-      if (!container) return;
-
-      container.innerHTML = '';
-      logs.forEach(function(log) {
-        var row = document.createElement('div');
-        row.className = 'log-entry log-' + (log.level || 'info');
-        var ts = new Date(log.timestamp).toLocaleTimeString();
-        row.textContent = ts + ' [' + (log.level || 'info').toUpperCase() + '] ' + log.message;
-        container.appendChild(row);
-      });
-
-      if (logs.length === 0) {
-        container.innerHTML = '<div class="empty">No logs yet.</div>';
-      }
-    }).catch(function() {
-      // Silently fail and retry
-    }).finally(function() {
-      window.setTimeout(fetchLogs, LOG_POLL_MS);
-    });
-  }
-
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", fetchLogs);
-  } else {
-    fetchLogs();
-  }
+(function(){
+  'use strict';
+  function fetchLogs(){fetch('/logs',{credentials:'same-origin',headers:{Accept:'application/json'}}).then(function(r){return r.ok?r.json():null;}).then(function(logs){if(!Array.isArray(logs))return;var container=document.getElementById('logs-list');if(!container)return;container.replaceChildren();if(!logs.length){var empty=document.createElement('div');empty.className='empty';empty.textContent='No logs yet.';container.appendChild(empty);return;}logs.forEach(function(log){var row=document.createElement('div');var level=String(log.level||'info').replace(/[^a-z-]/gi,'');row.className='log-entry log-'+level;var ts=new Date(log.timestamp).toLocaleTimeString();row.textContent=ts+' ['+String(log.level||'info').toUpperCase()+'] '+String(log.message||'');container.appendChild(row);});}).catch(function(){}).finally(function(){window.setTimeout(fetchLogs,5000);});}
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',fetchLogs);else fetchLogs();
 })();
 
-// Credentials poller
-(function() {
-  function load() {
-    fetch('/credentials', { credentials: 'same-origin', headers: {'Accept': 'application/json'} })
-    .then(r => r.ok ? r.json() : null).then(creds => {
-      if (!creds) return;
-      const c = document.getElementById('credentials-list');
-      if (!c) return;
-      if (creds.length === 0) {
-        c.innerHTML = '<div class="empty">No credentials yet.</div>';
-        document.getElementById('export-btn').disabled = true;
-        document.getElementById('clear-btn').disabled = true;
-        return;
-      }
-      c.innerHTML = creds.map(cr => {
-        var secretTrunc = cr.secret_key.substring(0, 16) + '...';
-        return `<div class="credential-row"><code>${cr.access_key}:${secretTrunc}:${cr.region}</code></div>`;
-      }).join('');
-      document.getElementById('export-btn').disabled = false;
-      document.getElementById('clear-btn').disabled = false;
-    });
-  }
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", load);
-  else load();
+(function(){
+  'use strict';
+  function setActions(enabled){var exportButton=document.getElementById('export-btn');var clearButton=document.getElementById('clear-btn');if(exportButton)exportButton.setAttribute('aria-disabled',enabled?'false':'true');if(clearButton)clearButton.disabled=!enabled;}
+  function load(){fetch('/credentials',{credentials:'same-origin',headers:{Accept:'application/json'}}).then(function(r){return r.ok?r.json():null;}).then(function(creds){if(!Array.isArray(creds))return;var container=document.getElementById('credentials-list');if(!container)return;container.replaceChildren();if(!creds.length){var empty=document.createElement('div');empty.className='empty';empty.textContent='No credentials yet.';container.appendChild(empty);setActions(false);return;}creds.forEach(function(credential){var row=document.createElement('div');row.className='credential-row';var code=document.createElement('code');var secret=String(credential.secret_key||'');code.textContent=String(credential.access_key||'')+':'+secret.slice(0,16)+(secret.length>16?'…':'')+':'+String(credential.region||'unknown');row.appendChild(code);container.appendChild(row);});setActions(true);});}
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',load);else load();
 })();

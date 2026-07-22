@@ -1,9 +1,1 @@
-/* Download progress bar for active jobs. Loaded as an external stylesheet
-   so it complies with the dashboard's Content-Security-Policy (style-src 'self'). */
-.dl-progress{margin-top:.5rem;max-width:260px}
-.dl-progress[hidden]{display:none}
-.dl-bar{position:relative;height:8px;border-radius:999px;background:rgba(148,163,184,.25);overflow:hidden}
-.dl-bar>i{position:absolute;inset:0 auto 0 0;width:0%;border-radius:999px;
-  background:linear-gradient(90deg,#38bdf8,#6366f1);transition:width .4s ease}
-.dl-label{display:block;margin-top:.3rem;font-size:.72rem;color:var(--muted,#94a3b8);
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dl-progress{width:100%;max-width:320px;margin-top:8px}.dl-progress[hidden]{display:none}.dl-bar{position:relative;height:6px;overflow:hidden;border-radius:999px;background:rgba(102,112,133,.2)}.dl-bar>i{position:absolute;inset:0 auto 0 0;width:0;border-radius:inherit;background:linear-gradient(90deg,var(--blue),#6b7ee8);transition:width .35s ease}.dl-label{display:block;margin-top:5px;color:var(--muted);font-size:11px;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}@media(prefers-reduced-motion:reduce){.dl-bar>i{transition:none}}
