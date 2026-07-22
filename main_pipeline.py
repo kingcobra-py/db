@@ -175,7 +175,9 @@ class Pipeline:
                     progress_callback=self._make_progress_callback(progress,job_id,index,file_count,filename),
                 )
                 total+=destination.stat().st_size
-                if total>self.s.max_download_bytes: raise ValueError('Download exceeds MAX_DOWNLOAD_BYTES')
+                available = shutil.disk_usage(self.s.inbox_dir).free
+                if available <= self.s.min_free_bytes:
+                    raise ValueError(f'Insufficient disk space')
                 files.append(str(destination))
             if not files: raise ValueError('Telegram message has no downloadable media')
             # Fill in the downloaded files and re-queue as pending for the worker.
