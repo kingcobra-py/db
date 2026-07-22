@@ -247,6 +247,13 @@ class Dashboard:
             msg = f"Submitted {count} download(s)" if count > 1 else "Channel download submitted"
             return RedirectResponse(f'/?notice={quote_plus(msg)}', 303)
 
+        @self.app.post('/jobs/stop-all')
+        async def stop_all_jobs(request: Request, csrf: str = Form(...)):
+            """Stop all running and pending jobs."""
+            self._require_post(request, csrf)
+            count = await asyncio.to_thread(self.db.stop_all_jobs)
+            return RedirectResponse(f'/?notice={quote_plus(f"Stopped {count} job(s)")}', 303)
+
         @self.app.get('/jobs/{job_id}/progress')
         async def job_progress(job_id: int,request: Request):
             self._require(request)
