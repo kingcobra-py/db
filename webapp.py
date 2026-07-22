@@ -69,6 +69,61 @@ class Dashboard:
         self._require(request)
         if not secrets.compare_digest(csrf,self._csrf()): raise HTTPException(403,'Invalid CSRF token')
 
+    def _expand_message_range(self, url: str) -> list[str]:
+        """
+        Expand message range URLs into individual message URLs.
+
+        Examples:
+        - https://t.me/channel/100-105 -> [https://t.me/channel/100, .../101, .../102, .../103, .../104, .../105]
+        - https://t.me/c/12345/50-52 -> [https://t.me/c/12345/50, .../51, .../52]
+        - https://t.me/channel/100 -> [https://t.me/channel/100]
+        """
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url.strip())
+        if parsed.scheme != 'https' or parsed.hostname not in {'t.me', 'www.t.me', 'telegram.me', 'www.telegram.me'}:
+            raise ValueError('Use an https://t.me message link')
+
+        parts = [p for p in parsed.path.split('/') if p]
+        if len(parts) < 2:
+            raise ValueError('Invalid message link format')
+
+        message_part = parts[-1]
+
+        # Check if it's a range (contains dash with numbers on both sides)
+        if '-' in message_part:
+            range_parts = message_part.split('-')
+            if len(range_parts) != 2:
+                raise ValueError('Invalid range format. Use: channel/START-END')
+
+            try:
+                start = int(range_parts[0])
+                end = int(range_parts[1])
+            except ValueError:
+                raise ValueError('Range must be numbers only (e.g., 100-105)')
+
+            if start > end:
+                raise ValueError('Range start must be <= end')
+
+            if end - start + 1 > 500:
+                raise ValueError('Range too large (max 500 messages at once)')
+
+            # Build base URL
+            base_parts = parts[:-1]
+            base_url = f"https://t.me/{'/'.join(base_parts)}"
+
+            # Expand to individual URLs
+            urls = [f"{base_url}/{msg_id}" for msg_id in range(start, end + 1)]
+            return urls
+        else:
+            # Single message, validate and return as-is
+            if not message_part.isdigit():
+                raise ValueError('Message ID must be a number')
+
+            # Validate the URL format using pipeline validator
+            self.pipeline.validate_channel_link(url)
+            return [url]
+
     def _middleware(self):
         self.app.add_middleware(SessionMiddleware, secret_key=self.s.dashboard_secret.hex(), max_age=900)
 
@@ -171,12 +226,26 @@ class Dashboard:
             return RedirectResponse(f'/?notice={quote_plus(f"Extraction workers set to {workers}")}',303)
 
         @self.app.post('/channel-links')
-        async def add_link(request: Request,url: str=Form(...),max_files: str=Form('0'),csrf: str=Form(...)):
-            self._require_post(request,csrf)
-            try: self.pipeline.validate_channel_link(url)
-            except ValueError as exc: return RedirectResponse(f'/?error={quote_plus(str(exc))}',303)
-            asyncio.create_task(self.pipeline.ingest_channel_link(url),name='channel-link-ingest')
-            return RedirectResponse('/?notice=Channel+download+submitted',303)
+        async def add_link(request: Request, url: str=Form(...), csrf: str=Form(...)):
+            self._require_post(request, csrf)
+
+            # Parse and expand range URLs
+            urls_to_submit = []
+            try:
+                urls_to_submit = await asyncio.to_thread(self._expand_message_range, url)
+            except ValueError as exc:
+                return RedirectResponse(f'/?error={quote_plus(str(exc))}', 303)
+
+            if not urls_to_submit:
+                return RedirectResponse(f'/?error={quote_plus("No valid URLs to submit")}', 303)
+
+            # Submit all URLs
+            for submit_url in urls_to_submit:
+                asyncio.create_task(self.pipeline.ingest_channel_link(submit_url), name='channel-link-ingest')
+
+            count = len(urls_to_submit)
+            msg = f"Submitted {count} download(s)" if count > 1 else "Channel download submitted"
+            return RedirectResponse(f'/?notice={quote_plus(msg)}', 303)
 
         @self.app.get('/jobs/{job_id}/progress')
         async def job_progress(job_id: int,request: Request):
