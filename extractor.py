@@ -140,8 +140,6 @@ class ArchiveProcessor:
                     expanded += int(line[7:].strip())
             if count > self.s.max_archive_files:
                 raise ExtractionError("Archive file-count limit exceeded")
-            if expanded > self.s.max_expanded_bytes:
-                raise ExtractionError("Declared expanded-size limit exceeded")
         if count == 0:
             raise ExtractionError("Archive is empty or unreadable")
         return count, expanded
