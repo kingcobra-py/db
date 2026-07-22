@@ -36,7 +36,11 @@ def _should_scan_file(path: Path) -> bool:
     """Check if file should be scanned for credentials.
     
     Scans: .txt, .csv, .log, .conf, .json, .yaml, .yml, 'credentials' files
-    in folders containing 'aws', 'azure', 'credentials', 'secret', or similar keywords
+    regardless of parent folder name. Keyword-containing folders are no
+    longer a hard requirement, since extracted archives commonly land in
+    folders (e.g. '.nested-0-0-@Everlasting_Cloud_logs') that don't match
+    any of the known keywords but still contain valid, scannable files.
+    Report/output files are excluded.
     """
     if not path.is_file():
         return False
@@ -50,11 +54,14 @@ def _should_scan_file(path: Path) -> bool:
     if file_ext not in valid_extensions and file_name != 'credentials':
         return False
     
-    # Check folder path for relevant keywords
-    parent_path = str(path.parent).lower()
-    keywords = {'aws', 'azure', 'credentials', 'secret', 'config', 'keys', 'tokens', '.aws'}
+    # Skip files under /data/output (report files), if present
+    try:
+        path.resolve().relative_to(Path('/data/output'))
+        return False
+    except ValueError:
+        pass
     
-    return any(keyword in parent_path for keyword in keywords)
+    return True
 
 
 def _count_scannable_files(root: Path) -> int:
