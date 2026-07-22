@@ -226,28 +226,56 @@ class Pipeline:
         await self.notify(job.chat_id,'🧰 Validating and extracting archive…',job.message_id)
         try:
             root=await asyncio.to_thread(self.extractor.process,job.message_id,[Path(p) for p in job.input_files])
-            await self.notify(job.chat_id,'🔎 Scanning .txt, .csv, and .log files…',job.message_id)
+            
+            # Notify about scan start
+            await self.notify(job.chat_id,'🔎 Scanning for credentials in extracted files…',job.message_id)
+            LOG.info('Starting credential scan',extra={'job_id':job.id,'message_id':job.message_id,'stage':'processing'})
+            
             findings,summary=await asyncio.to_thread(scan_tree,root,self.s.max_scan_file_bytes,self.s.fingerprint_key)
             text,summary_json=await asyncio.to_thread(write_results,self.s.output_dir,job.message_id,findings,summary)
             await asyncio.to_thread(self.db.mark_completed,job.id,str(text),str(summary_json),summary)
             
+            # Notify scan results
+            scan_msg=f"✅ Scan Results:\n📄 Files scanned: {summary['files_scanned']}\n🔍 Findings: {summary['findings']}"
+            await self.notify(job.chat_id,scan_msg,job.message_id)
+            LOG.info('Credential scan complete',extra={'job_id':job.id,'message_id':job.message_id,'files_scanned':summary['files_scanned'],'findings':summary['findings'],'stage':'processing'})
+            
             # Extract raw credentials and send to Telegram
+            await self.notify(job.chat_id,'🔑 Extracting raw AWS credentials…',job.message_id)
             raw_creds=await asyncio.to_thread(extract_raw_credentials,root)
+            
             if raw_creds and job.chat_id:
                 creds_file=self.s.output_dir/f'credentials-{job.message_id}.txt'
                 creds_lines=[f"{c['access_key']}:{c['secret_key']}:{c['region']}" for c in raw_creds]
                 creds_file.write_text('\n'.join(creds_lines)+'\n',encoding='utf-8')
                 creds_file.chmod(0o600)
-                await self.client.send_file(job.chat_id,str(creds_file),caption=f"🔑 Extracted {len(raw_creds)} credential(s) (key:secret:region)",reply_to=job.message_id)
-                LOG.info('Credentials file sent',extra={'job_id':job.id,'message_id':job.message_id,'creds_count':len(raw_creds),'stage':'processing'})
+                
+                # Count files with credentials
+                unique_files=len(set(c['file'] for c in raw_creds))
+                creds_msg=(
+                    f"🔑 AWS Credentials Extracted (key:secret:region)\n"
+                    f"📊 Total credentials found: {len(raw_creds)}\n"
+                    f"📁 Files containing credentials: {unique_files}\n"
+                    f"✅ Credentials file ready to download"
+                )
+                await self.notify(job.chat_id,creds_msg,job.message_id)
+                await self.client.send_file(job.chat_id,str(creds_file),caption=creds_msg,reply_to=job.message_id)
+                LOG.info('Credentials extracted and sent',extra={'job_id':job.id,'message_id':job.message_id,'creds_count':len(raw_creds),'files_with_creds':unique_files,'stage':'processing'})
+            else:
+                if job.chat_id:
+                    await self.notify(job.chat_id,'⚠️ No raw AWS credentials found in extracted files',job.message_id)
+                LOG.info('No raw credentials found',extra={'job_id':job.id,'message_id':job.message_id,'stage':'processing'})
             
+            # Send redacted reports
             if job.chat_id:
-                await self.client.send_file(job.chat_id,str(text),caption=f"✅ Scan complete. Files: {summary['files_scanned']}; redacted findings: {summary['findings']}.",reply_to=job.message_id)
-                await self.client.send_file(job.chat_id,str(summary_json),caption='Machine-readable summary.',reply_to=job.message_id)
+                await self.client.send_file(job.chat_id,str(text),caption=f"📄 Redacted Report (Files: {summary['files_scanned']}, Findings: {summary['findings']})",reply_to=job.message_id)
+                await self.client.send_file(job.chat_id,str(summary_json),caption='📊 Machine-readable summary (JSON)',reply_to=job.message_id)
+                
+            LOG.info('Job completed successfully',extra={'job_id':job.id,'message_id':job.message_id,'stage':'processing'})
         except Exception as exc:
             LOG.exception('Job failed',extra={'job_id':job.id,'message_id':job.message_id,'user_id':job.user_id,'stage':'processing'})
             await asyncio.to_thread(self.db.mark_failed,job.id,f'{type(exc).__name__}: {exc}')
-            await self.notify(job.chat_id,f'❌ Processing failed safely: {type(exc).__name__}: {exc}',job.message_id)
+            await self.notify(job.chat_id,f'❌ Processing failed: {type(exc).__name__}: {exc}',job.message_id)
 
     async def worker(self):
         while True:
