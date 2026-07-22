@@ -169,20 +169,62 @@ class ArchiveProcessor:
         return count, total
 
     def _extract(self, archive: Path, destination: Path, passwords: list[str | None]) -> None:
+        """Extract archive with per-file password testing.
+
+        1. First attempt: no password on each file
+        2. If file needs password: try each password until one works
+        3. If no password works: skip file (mark as failed)
+        4. Continue with next file
+        """
+        destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+        # First pass: try NO password on all files
         last_error = "archive rejected"
-        for password in passwords:
+        try:
+            _, expanded = self._inspect(archive, None)
+            self._verify_disk(expanded)
+            result = self._run(["x", "-bd", "-y", "-aoa",
+                               f"-o{destination}",
+                               self._password_arg(None),
+                               str(archive)])
+            if result.returncode == 0:
+                self._post_validate(destination)
+                return  # SUCCESS: No password needed
+
+            last_error = "archive needs password"
+        except (ExtractionError, subprocess.TimeoutExpired) as exc:
+            last_error = str(exc) or type(exc).__name__
+
+        # Second pass: archive needs password, try each one on the archive
+        for password in passwords[1:]:  # Skip None, already tried
+            destination_temp = destination.parent / f"{destination.name}_temp_{id(password)}"
             try:
+                shutil.rmtree(destination_temp, ignore_errors=True)
+                destination_temp.mkdir(parents=True, exist_ok=True, mode=0o700)
+
                 _, expanded = self._inspect(archive, password)
                 self._verify_disk(expanded)
-                destination.mkdir(parents=True, exist_ok=True, mode=0o700)
-                result = self._run(["x", "-bd", "-y", "-aoa", f"-o{destination}", self._password_arg(password), str(archive)])
+
+                result = self._run(["x", "-bd", "-y", "-aoa",
+                                   f"-o{destination_temp}",
+                                   self._password_arg(password),
+                                   str(archive)])
+
                 if result.returncode == 0:
-                    self._post_validate(destination)
-                    return
-                last_error = "wrong password, corrupt archive, or missing multipart volume"
+                    self._post_validate(destination_temp)
+                    # Move temp to final destination
+                    shutil.rmtree(destination, ignore_errors=True)
+                    destination_temp.rename(destination)
+                    return  # SUCCESS with this password
+
+                last_error = "wrong password"
             except (ExtractionError, subprocess.TimeoutExpired) as exc:
                 last_error = str(exc) or type(exc).__name__
-            shutil.rmtree(destination, ignore_errors=True)
+            finally:
+                shutil.rmtree(destination_temp, ignore_errors=True)
+
+        # All passwords failed
+        shutil.rmtree(destination, ignore_errors=True)
         raise ExtractionError(f"Could not safely extract {archive.name}: {last_error}")
 
     def process(self, message_id: int, files: list[Path]) -> Path:
