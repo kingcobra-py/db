@@ -210,3 +210,10 @@ class DatabaseManager:
         with self.connect() as db:
             cursor = db.execute('DELETE FROM extracted_credentials')
             return cursor.rowcount
+
+    def stop_all_jobs(self) -> int:
+        """Mark all pending and running jobs as failed. Returns count updated."""
+        with self.connect() as db:
+            cursor = db.execute(
+                "UPDATE jobs SET status = 'failed' WHERE status IN ('pending', 'running')")
+            return cursor.rowcount

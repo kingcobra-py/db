@@ -178,6 +178,40 @@ class Dashboard:
             asyncio.create_task(self.pipeline.ingest_channel_link(url),name='channel-link-ingest')
             return RedirectResponse('/?notice=Channel+download+submitted',303)
 
+        @self.app.post('/channel-links/bulk')
+        async def add_links_bulk(request: Request, urls: str = Form(...), csrf: str = Form(...)):
+            """Submit multiple channel links at once."""
+            self._require_post(request, csrf)
+            url_list = [u.strip() for u in urls.split('\n') if u.strip()]
+            if not url_list:
+                return RedirectResponse(f'/?error={quote_plus("No URLs provided")}', 303)
+
+            # Validate all URLs first
+            invalid = []
+            for url in url_list:
+                try:
+                    self.pipeline.validate_channel_link(url)
+                except ValueError as exc:
+                    invalid.append(f"{url}: {exc}")
+
+            if invalid:
+                error_msg = "Invalid URLs: " + "; ".join(invalid[:3])
+                return RedirectResponse(f'/?error={quote_plus(error_msg)}', 303)
+
+            # Submit all valid URLs
+            count = len(url_list)
+            for url in url_list:
+                asyncio.create_task(self.pipeline.ingest_channel_link(url), name='channel-link-ingest')
+
+            return RedirectResponse(f'/?notice={quote_plus(f"Submitted {count} download(s)")}', 303)
+
+        @self.app.post('/jobs/stop-all')
+        async def stop_all_jobs(request: Request, csrf: str = Form(...)):
+            """Stop all running and pending jobs."""
+            self._require_post(request, csrf)
+            count = await asyncio.to_thread(self.db.stop_all_jobs)
+            return RedirectResponse(f'/?notice={quote_plus(f"Stopped {count} job(s)")}', 303)
+
         @self.app.get('/jobs/{job_id}/progress')
         async def job_progress(job_id: int,request: Request):
             self._require(request)
