@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import quote_plus
 from typing import Any
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
@@ -233,6 +233,25 @@ class Dashboard:
             except Exception:
                 pass
             return []
+
+        @self.app.get('/credentials')
+        async def get_credentials(request: Request):
+            self._require(request)
+            return await asyncio.to_thread(self.db.get_all_credentials)
+
+        @self.app.post('/credentials/clear-all')
+        async def clear_creds(request: Request, csrf: str = Form(...)):
+            self._require_post(request, csrf)
+            count = await asyncio.to_thread(self.db.clear_all_credentials)
+            return RedirectResponse(f'/?notice=Deleted+{count}+credentials', 303)
+
+        @self.app.get('/credentials/export')
+        async def export_creds(request: Request):
+            self._require(request)
+            creds = await asyncio.to_thread(self.db.get_all_credentials)
+            lines = [f"{c['access_key']}:{c['secret_key']}:{c['region']}" for c in creds]
+            return Response('\n'.join(lines)+'\n' if lines else '', media_type='text/plain',
+                            headers={'Content-Disposition': 'attachment; filename=credentials.txt'})
 
         @self.app.get('/session-regenerate')
         async def session_regenerate(request: Request):

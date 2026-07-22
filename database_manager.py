@@ -59,6 +59,11 @@ class DatabaseManager:
             ):
                 if col not in columns: db.execute(f"ALTER TABLE jobs ADD COLUMN {ddl}")
             db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status,created_at)")
+            db.execute('''CREATE TABLE IF NOT EXISTS extracted_credentials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER, access_key TEXT, 
+                secret_key TEXT, region TEXT, file_path TEXT, line_number INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            db.commit()
 
     def _job(self, r): return Job(int(r['id']),int(r['message_id']),int(r['chat_id']),int(r['user_id']),json.loads(r['input_files_json']),str(r['status']),int(r['attempts']))
 
@@ -183,3 +188,25 @@ class DatabaseManager:
     def get_extraction_workers(self, default: int = 1) -> int:
         try: return int(self.get_config('extraction_workers', default))
         except (TypeError, ValueError): return default
+
+    def save_credentials(self, job_id: int, credentials: list) -> None:
+        with self.connect() as db:
+            for cred in credentials:
+                db.execute('''INSERT INTO extracted_credentials 
+                    (job_id, access_key, secret_key, region, file_path, line_number)
+                    VALUES (?, ?, ?, ?, ?, ?)''',
+                    (job_id, cred['access_key'], cred['secret_key'], cred.get('region', 'unknown'),
+                     cred.get('file', ''), cred.get('line', 0)))
+
+    def get_all_credentials(self) -> list:
+        with self.connect() as db:
+            cursor = db.execute(
+                '''SELECT access_key, secret_key, region, created_at 
+                   FROM extracted_credentials ORDER BY created_at DESC''')
+            return [{'access_key': r[0], 'secret_key': r[1], 'region': r[2], 'created_at': r[3]} 
+                    for r in cursor]
+
+    def clear_all_credentials(self) -> int:
+        with self.connect() as db:
+            cursor = db.execute('DELETE FROM extracted_credentials')
+            return cursor.rowcount

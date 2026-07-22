@@ -1,41 +1,40 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="en">
 <head>
-    <title>Regenerate Telegram Session</title>
-    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
-    <style>
-        body { font-family: sans-serif; margin: 40px; }
-        .panel { max-width: 500px; margin: 0 auto; border: 1px solid #ccc; padding: 20px; border-radius: 8px; }
-        input { width: 100%; padding: 8px; margin: 10px 0; box-sizing: border-box; }
-        button { width: 100%; padding: 10px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
-        button:hover { background: #0056b3; }
-        .info { background: #e7f3ff; padding: 10px; margin: 10px 0; border-radius: 4px; }
-    </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Session Regenerate</title>
+  <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-    <div class="panel">
-        <h2>Regenerate Telegram Session</h2>
-        
-        {% if step == 1 %}
-            <div class="info">Enter your Telegram phone number to receive a verification code.</div>
-            <form method="post" action="/session-regenerate/send-code">
-                <input type="hidden" name="csrf" value="{{ csrf }}">
-                <label for="phone">Phone Number (with country code)</label>
-                <input id="phone" name="phone_number" type="tel" placeholder="+1234567890" required autofocus>
-                <button type="submit">Send Code</button>
-            </form>
-        
-        {% elif step == 2 %}
-            <div class="info">✅ Code sent to {{ phone }}</div>
-            <form method="post" action="/session-regenerate/verify-code">
-                <input type="hidden" name="csrf" value="{{ csrf }}">
-                <label for="code">Verification Code</label>
-                <input id="code" name="code" type="text" placeholder="12345" required autofocus>
-                <label for="password">2FA Password (if enabled)</label>
-                <input id="password" name="password" type="password" placeholder="Leave blank if no 2FA">
-                <button type="submit">Verify & Update Session</button>
-            </form>
-        {% endif %}
-    </div>
+<header class="topbar">
+  <a class="brand" href="/"><span class="brand-mark">A</span><span>Archive Scanner</span></a>
+</header>
+<main class="container">
+  <section class="panel">
+    <div class="panel-head"><div><p class="eyebrow">Account</p><h2>Regenerate Session</h2></div>
+    <span class="icon-box">🔐</span></div>
+    <p class="muted">Update Telegram account. Phone + 2FA (if enabled) required.</p>
+    {% if step == 1 %}
+    <form method="post" action="/session-regenerate/send-code" class="stack">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label>Phone Number</label>
+      <input name="phone_number" type="tel" placeholder="+1234567890" required>
+      <p class="muted">Include country code</p>
+      <button type="submit">Send Code</button>
+    </form>
+    {% elif step == 2 %}
+    <form method="post" action="/session-regenerate/verify-code" class="stack">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <p class="muted">Code sent to <strong>{{ phone }}</strong></p>
+      <label>Code</label>
+      <input name="code" type="text" placeholder="12345" required>
+      <label>2FA (optional)</label>
+      <input name="password" type="password" placeholder="Leave blank if none">
+      <button type="submit">Verify & Update</button>
+    </form>
+    {% endif %}
+  </section>
+</main>
 </body>
 </html>
