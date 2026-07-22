@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 import secrets
 import time
@@ -189,6 +190,23 @@ class Dashboard:
                 'file':data['file'],'index':data['index'],'count':data['count'],
             }
 
+        @self.app.get('/jobs/{job_id}/scan-metrics')
+        async def job_scan_metrics(job_id: int, request: Request):
+            """Return scan metrics (files_scanned, findings) for a completed job."""
+            self._require(request)
+            data = await asyncio.to_thread(self.db.output_for_job, job_id, 'summary')
+            if not data:
+                raise HTTPException(404, 'Job not found or summary unavailable')
+            try:
+                summary_json = json.loads(data)
+                return {
+                    'files_scanned': summary_json.get('files_scanned', 0),
+                    'findings': summary_json.get('findings', 0),
+                    'by_type': summary_json.get('by_type', {})
+                }
+            except Exception:
+                raise HTTPException(500, 'Could not parse job summary')
+
         @self.app.get('/jobs/{job_id}/{kind}')
         async def download(job_id: int,kind: str,request: Request):
             self._require(request)
@@ -200,6 +218,21 @@ class Dashboard:
             except ValueError: raise HTTPException(403,'Invalid output path')
             if not path.is_file(): raise HTTPException(404,'File missing')
             return FileResponse(path,filename=path.name,media_type='application/json' if kind=='summary' else 'text/plain')
+
+        @self.app.get('/logs')
+        async def get_logs(request: Request):
+            """Return recent activity logs."""
+            self._require(request)
+            # For now, return a hardcoded empty list; can be expanded to read from database
+            # or a logs file at /data/logs.json
+            try:
+                logs_file = self.s.data_root / 'activity-logs.json'
+                if logs_file.exists():
+                    logs_data = json.loads(logs_file.read_text(encoding='utf-8'))
+                    return logs_data[-30:]  # Last 30 entries
+            except Exception:
+                pass
+            return []
 
         @self.app.get('/session-regenerate')
         async def session_regenerate(request: Request):

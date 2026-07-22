@@ -78,4 +78,73 @@
   } else {
     tick();
   }
+
+  // Load scan metrics for completed jobs
+  function loadScanMetrics() {
+    document.querySelectorAll('tr[data-job-status="completed"]').forEach(function(row) {
+      var jobId = row.getAttribute('data-job-id');
+      fetch('/jobs/' + encodeURIComponent(jobId) + '/scan-metrics', {
+        credentials: 'same-origin',
+        headers: { 'Accept': 'application/json' }
+      }).then(function (r) {
+        if (!r.ok) return;
+        return r.json();
+      }).then(function (data) {
+        if (!data) return;
+        var filesEl = document.getElementById('files-' + jobId);
+        var findingsEl = document.getElementById('findings-' + jobId);
+        if (filesEl) filesEl.textContent = data.files_scanned;
+        if (findingsEl) findingsEl.textContent = data.findings;
+      }).catch(function () {});
+    });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", loadScanMetrics);
+  } else {
+    loadScanMetrics();
+  }
+})();
+
+// Log poller for activity logs
+(function logPoller() {
+  var LOG_POLL_MS = 5000;
+  var lastLogTime = 0;
+
+  function fetchLogs() {
+    fetch('/logs', {
+      credentials: 'same-origin',
+      headers: { 'Accept': 'application/json' }
+    }).then(function(r) {
+      if (!r.ok) return;
+      return r.json();
+    }).then(function(logs) {
+      if (!logs || !Array.isArray(logs)) return;
+      var container = document.getElementById('logs-list');
+      if (!container) return;
+
+      container.innerHTML = '';
+      logs.forEach(function(log) {
+        var row = document.createElement('div');
+        row.className = 'log-entry log-' + (log.level || 'info');
+        var ts = new Date(log.timestamp).toLocaleTimeString();
+        row.textContent = ts + ' [' + (log.level || 'info').toUpperCase() + '] ' + log.message;
+        container.appendChild(row);
+      });
+
+      if (logs.length === 0) {
+        container.innerHTML = '<div class="empty">No logs yet.</div>';
+      }
+    }).catch(function() {
+      // Silently fail and retry
+    }).finally(function() {
+      window.setTimeout(fetchLogs, LOG_POLL_MS);
+    });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", fetchLogs);
+  } else {
+    fetchLogs();
+  }
 })();
