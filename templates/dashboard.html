@@ -1,61 +1,96 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Archive Scanner</title><link rel="stylesheet" href="/static/styles.css"><link rel="stylesheet" href="/static/progress.css"><script src="/static/app.js" defer></script><script src="/static/progress.js" defer></script></head>
-<body><header class="topbar"><a class="brand" href="/"><span class="brand-mark">A</span><span>Archive Scanner</span></a><form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="ghost" type="submit">Sign out</button></form></header>
-<main class="container"><section class="hero"><div><p class="eyebrow">Telegram security pipeline</p><h1>Downloads and scans, in one place.</h1><p class="muted hero-copy">Submit authorized Telegram channel messages, manage encrypted archive passwords, and download redacted reports.</p></div><span class="live"><i></i> Worker online</span></section>
-{% if notice %}<div class="alert success" role="status">{{ notice }}</div>{% endif %}{% if error %}<div class="alert error" role="alert">{{ error }}</div>{% endif %}
-<section class="stats" aria-label="Job statistics">{% for key,label in [('pending','Pending'),('running','Running'),('completed','Completed'),('failed','Failed')] %}<article class="stat"><span>{{ label }}</span><strong>{{ stats[key] }}</strong></article>{% endfor %}</section>
-<div class="action-buttons">
-  <form method="post" action="/jobs/stop-all" data-confirm="Stop ALL running and pending jobs? This cannot be undone.">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button class="danger" type="submit">⏹ Stop All Jobs</button>
-  </form>
-</div>
-<section class="panel storage-panel" aria-label="Storage usage"><div class="panel-head"><div><p class="eyebrow">Disk usage</p><h2>Total Storage Used: {{ storage_human }}</h2></div><span class="icon-box">&#128190;</span></div><p class="muted">Includes every downloaded compressed archive tracked across all jobs. Extracted and output files are removed but not counted above.</p><form method="post" action="/cleanup-files" data-confirm="Remove ALL downloaded and extracted files? This cannot be undone."><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger" type="submit">Cleanup All Files</button></form></section>
-<section class="panel performance-panel" aria-label="Performance settings"><div class="panel-head"><div><p class="eyebrow">Concurrency</p><h2>Performance Settings</h2></div><span class="icon-box">&#9881;</span></div><p class="muted">Current worker count: <strong>{{ extraction_workers }}</strong></p><form method="post" action="/config/extraction-workers" class="inline-form" id="workers-form"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="ghost" type="button" id="workers-minus">-1</button><label class="sr-only" for="workers">Extraction workers</label><input id="workers" name="workers" type="number" min="1" max="24" value="{{ extraction_workers }}" inputmode="numeric" required><button class="ghost" type="button" id="workers-plus">+1</button><button type="submit">Save</button></form><p class="muted">Higher = faster extraction, more CPU usage. Max 24.</p><script>document.getElementById('workers-minus').addEventListener('click',()=>{const i=document.getElementById('workers');i.value=Math.max(1,parseInt(i.value||'1',10)-1);});document.getElementById('workers-plus').addEventListener('click',()=>{const i=document.getElementById('workers');i.value=Math.min(24,parseInt(i.value||'1',10)+1);});</script></section>
-<section class="grid"><article class="panel"><div class="panel-head"><div><p class="eyebrow">New source</p><h2>Telegram channel link</h2></div><span class="icon-box">&#8599;</span></div><p class="muted">The signed-in Telegram account must already have access. Public posts and private <code>t.me/c/&#8230;</code> message links are supported.</p><form method="post" action="/channel-links" class="stack"><input type="hidden" name="csrf" value="{{ csrf }}"><label for="url">Message URL or Range</label><input id="url" name="url" type="url" inputmode="url" placeholder="https://t.me/channel/123 or https://t.me/channel/100-105" required><p class="muted">Single message or range: <code>channel/100-105</code> downloads messages 100 through 105</p><button type="submit">Queue download</button></form></article>
-<article class="panel"><div class="panel-head"><div><p class="eyebrow">Extraction</p><h2>Archive passwords</h2></div><span class="icon-box">&#9153;</span></div><p class="muted">Passwords are encrypted at rest and are only passed to the local extractor.</p><form method="post" action="/passwords" class="inline-form"><input type="hidden" name="csrf" value="{{ csrf }}"><label class="sr-only" for="archive-password">Archive password</label><input id="archive-password" name="password" type="password" placeholder="Add archive password" maxlength="512" required><button type="submit">Add</button></form><form method="post" action="/passwords/bulk" class="stack"><input type="hidden" name="csrf" value="{{ csrf }}"><label class="sr-only" for="bulk-passwords">Bulk passwords</label><textarea id="bulk-passwords" name="passwords" rows="5" placeholder="One password per line"></textarea><button type="submit">Add in bulk</button></form><div class="password-list">{% for password in passwords %}<div class="password-row"><span><b>Stored password</b><small>{{ password.masked }}</small></span><form method="post" action="/passwords/{{ password.id }}/delete" data-confirm="Remove this password?"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger-link" type="submit">Remove</button></form></div>{% else %}<div class="empty">No dashboard passwords stored.</div>{% endfor %}</div>{% if passwords %}<form method="post" action="/passwords/clear" class="stack" data-confirm="Remove ALL stored passwords? This cannot be undone."><input type="hidden" name="csrf" value="{{ csrf }}"><button class="ghost danger-link" type="submit">Remove all passwords</button></form>{% endif %}</article></section>
-<section class="panel jobs-panel"><div class="panel-head"><div><p class="eyebrow">Activity</p><h2>Recent jobs</h2></div><button class="ghost refresh" type="button">Refresh</button></div><div class="table-wrap"><table><thead><tr><th>Job</th><th>Source</th><th>Status</th><th>Created</th><th>Output</th></tr></thead><tbody>{% for job in jobs %}<tr data-job-id="{{ job.id }}" data-job-status="{{ job.status }}"><td><b>#{{ job.id }}</b><small>Message {{ job.message_id }}</small></td><td>{{ job.source }}</td><td><span class="status {{ job.status }}">{{ job.status }}</span>{% if job.error %}<small class="error-text" title="{{ job.error }}">{{ job.error }}</small>{% endif %}<div class="dl-progress" data-progress hidden><div class="dl-bar"><i></i></div><small class="dl-label"></small></div></td><td>{{ job.created_at }}</td><td>
-  {% if job.status == 'completed' %}
-    <div class="job-output">
-      <small class="metrics">📄 Files scanned: <strong id="files-{{ job.id }}">—</strong> | 🔍 Findings: <strong id="findings-{{ job.id }}">—</strong></small>
-      <div><a href="/jobs/{{ job.id }}/report">Report</a> <a href="/jobs/{{ job.id }}/summary">JSON</a></div>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Archive Scanner</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/progress.css">
+  <script src="/static/app.js" defer></script>
+  <script src="/static/progress.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/" aria-label="Archive Scanner home"><span class="brand-mark">AS</span><span>Archive Scanner</span></a>
+  <div class="topbar-actions"><span class="live"><i></i> Worker online</span><form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="button secondary compact" type="submit">Sign out</button></form></div>
+</header>
+<main class="container">
+  <section class="hero">
+    <div><p class="eyebrow">Telegram security pipeline</p><h1>Scan operations, clearly organized.</h1><p class="muted hero-copy">Queue authorized Telegram media, monitor every job, and manage extraction settings from one secure workspace.</p></div>
+  </section>
+  {% if notice %}<div class="alert success" role="status">{{ notice }}</div>{% endif %}
+  {% if error %}<div class="alert error" role="alert">{{ error }}</div>{% endif %}
+
+  <section class="stats" aria-label="Job statistics">
+    {% for key,label in [('pending','Pending'),('running','Running'),('completed','Completed'),('failed','Failed')] %}
+    <article class="stat stat-{{ key }}"><span>{{ label }}</span><strong>{{ stats[key] }}</strong><small>jobs</small></article>
+    {% endfor %}
+  </section>
+
+  <section class="workspace-grid">
+    <div class="workspace-main">
+      <article class="panel">
+        <div class="panel-head"><div><p class="eyebrow">New source</p><h2>Queue Telegram media</h2></div><span class="icon-box">↗</span></div>
+        <p class="muted">Use a specific public or private channel message that the connected Telegram account can already access.</p>
+        <form method="post" action="/channel-links" class="stack">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <label for="url">Message URL or range</label>
+          <div class="field-action"><input id="url" name="url" type="url" inputmode="url" placeholder="https://t.me/channel/100-105" required><button type="submit">Queue download</button></div>
+          <small class="help">Ranges are supported up to 500 messages, for example <code>channel/100-105</code>.</small>
+        </form>
+      </article>
+
+      <section class="panel jobs-panel">
+        <div class="panel-head jobs-head"><div><p class="eyebrow">Activity</p><h2>Recent jobs</h2><p class="muted panel-subtitle">Live download and scan status</p></div><div class="panel-actions"><button class="button secondary compact refresh" type="button">Refresh</button><form method="post" action="/jobs/stop-all" data-confirm="Stop all running and pending jobs?"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="button danger-soft compact" type="submit">Stop active</button></form></div></div>
+        <div class="job-list">
+          {% for job in jobs %}
+          <article class="job-card" data-job-id="{{ job.id }}" data-job-status="{{ job.status }}">
+            <div class="job-identity"><strong>#{{ job.id }}</strong><span class="source-badge">{{ job.source }}</span><small>Message {{ job.message_id }}</small></div>
+            <div class="job-state"><span class="status {{ job.status }}"><i></i>{{ job.status }}</span>{% if job.error %}<small class="error-text" title="{{ job.error }}">{{ job.error }}</small>{% endif %}<div class="dl-progress" data-progress hidden><div class="dl-bar"><i></i></div><small class="dl-label"></small></div></div>
+            <div class="job-time"><span>Created</span><time>{{ job.created_at }}</time></div>
+            <div class="job-output">
+              {% if job.status == 'completed' %}
+              <small class="metrics"><span><b id="files-{{ job.id }}">—</b> files</span><span><b id="findings-{{ job.id }}">—</b> findings</span></small>
+              <div class="output-links"><a class="text-link" href="/jobs/{{ job.id }}/report">Report</a><a class="text-link" href="/jobs/{{ job.id }}/summary">JSON</a></div>
+              {% else %}<span class="muted">No output yet</span>{% endif %}
+            </div>
+          </article>
+          {% else %}<div class="empty-state"><span>◎</span><strong>No jobs yet</strong><p>Queue a Telegram message to start your first scan.</p></div>{% endfor %}
+        </div>
+      </section>
     </div>
-  {% else %}
-    <span class="muted">&#8212;</span>
-  {% endif %}
-</td></tr>{% else %}<tr><td colspan="5" class="empty">No jobs yet.</td></tr>{% endfor %}</tbody></table></div></section>
-<section class="panel logs-panel" aria-label="Activity logs">
-  <div class="panel-head">
-    <div>
-      <p class="eyebrow">System Activity</p>
-      <h2>Output Logs</h2>
-    </div>
-    <span class="icon-box">📋</span>
-  </div>
-  <div class="logs-container">
-    <div id="logs-list" class="logs-list">
-      <div class="empty">Loading logs...</div>
-    </div>
-  </div>
-  <p class="muted">Last 30 log entries. Auto-refreshes every 5 seconds.</p>
-</section>
-<section class="panel credentials-panel">
-  <div class="panel-head">
-    <div><p class="eyebrow">Extracted</p><h2>AWS Credentials</h2></div>
-    <span class="icon-box">🔐</span>
-  </div>
-  <p class="muted">All extracted credentials, most recent first.</p>
-  <div class="credentials-container">
-    <div id="credentials-list" class="credentials-list">
-      <div class="empty">No credentials yet.</div>
-    </div>
-  </div>
-  <div class="credentials-actions">
-    <a href="/credentials/export" id="export-btn" disabled>📥 Export</a>
-    <form method="post" action="/credentials/clear-all" data-confirm="Delete ALL?">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <button class="danger" type="submit" id="clear-btn" disabled>🗑 Clear</button>
-    </form>
-  </div>
-</section>
-<footer>Only inspect channels and files you own or are authorized to access.</footer></main></body></html>
+
+    <aside class="workspace-side">
+      <section class="panel compact-panel">
+        <div class="panel-head"><div><p class="eyebrow">Storage</p><h2>{{ storage_human }} used</h2></div><span class="icon-box">▣</span></div>
+        <p class="muted">Downloaded archives tracked across all jobs.</p>
+        <form method="post" action="/cleanup-files" data-confirm="Remove all downloaded and extracted files?"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="button secondary full" type="submit">Clean up files</button></form>
+      </section>
+
+      <section class="panel compact-panel">
+        <div class="panel-head"><div><p class="eyebrow">Performance</p><h2>Extraction workers</h2></div><span class="count-badge">{{ extraction_workers }}</span></div>
+        <form method="post" action="/config/extraction-workers" class="stepper" id="workers-form">
+          <input type="hidden" name="csrf" value="{{ csrf }}"><button class="button secondary square" type="button" id="workers-minus" aria-label="Decrease workers">−</button><label class="sr-only" for="workers">Extraction workers</label><input id="workers" name="workers" type="number" min="1" max="24" value="{{ extraction_workers }}" inputmode="numeric" required><button class="button secondary square" type="button" id="workers-plus" aria-label="Increase workers">+</button><button type="submit">Save</button>
+        </form>
+        <small class="help">Higher values use more CPU. Maximum 24.</small>
+      </section>
+
+      <section class="panel compact-panel">
+        <div class="panel-head"><div><p class="eyebrow">Extraction</p><h2>Archive passwords</h2></div><span class="icon-box">⌁</span></div>
+        <p class="muted">Encrypted at rest and only shared with the local extractor.</p>
+        <form method="post" action="/passwords" class="field-action"><input type="hidden" name="csrf" value="{{ csrf }}"><label class="sr-only" for="archive-password">Archive password</label><input id="archive-password" name="password" type="password" placeholder="Add password" maxlength="512" required><button type="submit">Add</button></form>
+        <details class="bulk-details"><summary>Add multiple passwords</summary><form method="post" action="/passwords/bulk" class="stack"><input type="hidden" name="csrf" value="{{ csrf }}"><label class="sr-only" for="bulk-passwords">Bulk passwords</label><textarea id="bulk-passwords" name="passwords" rows="4" placeholder="One password per line"></textarea><button type="submit">Add in bulk</button></form></details>
+        <div class="password-list">{% for password in passwords %}<div class="password-row"><span><b>Stored password</b><small>{{ password.masked }}</small></span><form method="post" action="/passwords/{{ password.id }}/delete" data-confirm="Remove this password?"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="text-button danger-text" type="submit">Remove</button></form></div>{% else %}<div class="empty compact-empty">No saved passwords</div>{% endfor %}</div>
+        {% if passwords %}<form method="post" action="/passwords/clear" data-confirm="Remove all stored passwords?"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="text-button danger-text" type="submit">Remove all passwords</button></form>{% endif %}
+      </section>
+    </aside>
+  </section>
+
+  <section class="lower-grid">
+    <section class="panel logs-panel" aria-label="Activity logs"><div class="panel-head"><div><p class="eyebrow">System activity</p><h2>Output logs</h2></div><span class="icon-box">≡</span></div><div class="logs-container"><div id="logs-list" class="logs-list"><div class="empty">Loading logs…</div></div></div><small class="help">Last 30 entries · refreshes every 5 seconds</small></section>
+    <section class="panel credentials-panel"><div class="panel-head"><div><p class="eyebrow">Extracted</p><h2>AWS credentials</h2></div><span class="icon-box">◇</span></div><p class="muted">Most recent entries first. Secrets are shortened in this view.</p><div class="credentials-container"><div id="credentials-list" class="credentials-list"><div class="empty">No credentials yet.</div></div></div><div class="credentials-actions"><a href="/credentials/export" class="button secondary" id="export-btn" aria-disabled="true">Export</a><form method="post" action="/credentials/clear-all" data-confirm="Delete all extracted credentials?"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="button danger-soft full" type="submit" id="clear-btn" disabled>Clear</button></form></div></section>
+  </section>
+  <footer>Only inspect channels and files you own or are authorized to access.</footer>
+</main>
+</body>
+</html>
