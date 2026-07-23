@@ -276,33 +276,62 @@ class Pipeline:
             if not current or current.status not in {'pending', 'running'}:
                 LOG.info('Skipping stopped ingest job', extra={'job_id': job_id, 'stage': 'web-ingest'})
                 return
+            # Leave "queued" as soon as work starts so the dashboard is not stuck forever.
+            await asyncio.to_thread(self.db.update_progress, job_id, 'fetching', 0, 0, 'resolving message', 0, 0)
+            LOG.info('Starting channel ingest', extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest'})
             target,message_id=self.validate_channel_link(url)
-            entity=await self.client.get_entity(PeerChannel(int(target[2:]))) if target.startswith('c:') else await self.client.get_entity(target)
-            message=await self.client.get_messages(entity,ids=message_id)
+            if target.startswith('c:'):
+                entity = await asyncio.wait_for(
+                    self.client.get_entity(PeerChannel(int(target[2:]))),
+                    timeout=60,
+                )
+            else:
+                entity = await asyncio.wait_for(self.client.get_entity(target), timeout=60)
+            message = await asyncio.wait_for(
+                self.client.get_messages(entity, ids=message_id),
+                timeout=60,
+            )
             if not message: raise ValueError('Message is unavailable to the signed-in Telegram account')
             messages=[message]
             if message.grouped_id:
                 # Pull a wider nearby window so large albums are not truncated.
-                nearby=await self.client.get_messages(entity,limit=100,offset_id=message_id+50)
+                nearby = await asyncio.wait_for(
+                    self.client.get_messages(entity, limit=100, offset_id=message_id + 50),
+                    timeout=60,
+                )
                 messages=sorted({m.id:m for m in [message,*nearby] if m and m.grouped_id==message.grouped_id and m.media}.values(),key=lambda m:m.id)
+            await asyncio.to_thread(
+                self.db.update_progress, job_id, 'downloading', 0, 0,
+                getattr(getattr(messages[0], 'file', None), 'name', None) or 'media', 1, len(messages),
+            )
             await self.queue_messages(
                 messages=messages, job_key=job_key, chat_id=0, user_id=0,
                 source='channel-link', source_link=url, notify=False, existing_job_id=job_id,
             )
-            LOG.info('Channel link queued',extra={'job_id': job_id, 'message_id':job_key,'stage':'web-ingest'})
+            LOG.info('Channel link download finished',extra={'job_id': job_id, 'message_id':job_key,'stage':'web-ingest'})
         except asyncio.CancelledError:
             await asyncio.to_thread(self.db.mark_failed, job_id, 'Stopped by operator')
             raise
+        except asyncio.TimeoutError:
+            LOG.exception('Channel link ingest timed out', extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest'})
+            await asyncio.to_thread(self.db.mark_failed, job_id, 'Timeout while fetching Telegram message')
         except FloodWaitError as exc:
-            LOG.warning('Flood wait during channel ingest; sleeping %ss', exc.seconds, extra={'job_id': job_id, 'message_id':job_key,'stage':'web-ingest'})
+            # Cap sleep so one flood-wait cannot freeze the whole ingest queue for hours.
+            wait_for = min(int(exc.seconds) + 1, 90)
+            LOG.warning(
+                'Flood wait during channel ingest; pausing %ss (Telegram asked %ss)',
+                wait_for, exc.seconds,
+                extra={'job_id': job_id, 'message_id':job_key,'stage':'web-ingest'},
+            )
             await asyncio.to_thread(self.db.mark_failed,job_id,f'FloodWaitError: retry after {exc.seconds}s')
-            await asyncio.sleep(exc.seconds + 1)
+            await asyncio.sleep(wait_for)
         except Exception as exc:
             LOG.exception('Channel link ingest failed',extra={'job_id': job_id, 'message_id':job_key,'stage':'web-ingest'})
             await asyncio.to_thread(self.db.mark_failed,job_id,f'{type(exc).__name__}: {exc}')
 
     async def ingest_worker(self):
         """Serialize channel-link downloads to avoid Telegram flood / retry storms."""
+        LOG.info('Channel ingest worker online', extra={'stage': 'startup'})
         while True:
             item = await self.ingest_queue.get()
             # Backward-compatible if a bare URL string ever appears.
@@ -313,6 +342,12 @@ class Pipeline:
                     if item.get('job_id') is not None:
                         await asyncio.to_thread(self.db.mark_failed, item['job_id'], 'Stopped by operator')
                     continue
+                qsize = self.ingest_queue.qsize()
+                LOG.info(
+                    'Ingest worker picked job (%s still waiting)',
+                    qsize,
+                    extra={'job_id': item.get('job_id'), 'stage': 'web-ingest'},
+                )
                 work = asyncio.create_task(
                     self.ingest_channel_link(item['url'], item.get('job_id'), item.get('job_key')),
                     name=f"ingest-{item.get('job_id')}",
@@ -490,7 +525,19 @@ class Pipeline:
             except OSError: pass
             raise
         self._persist_session_string()
-        for job in await asyncio.to_thread(self.db.restore_interrupted_jobs): await self.queue.put(QueueItem(job.id))
+        download_jobs, extract_jobs = await asyncio.to_thread(self.db.restore_interrupted_work)
+        for item in download_jobs:
+            await asyncio.to_thread(
+                self.db.update_progress, item['job_id'], 'queued', 0, 0, 'waiting', 0, 0,
+            )
+            await self.ingest_queue.put(item)
+        for job in extract_jobs:
+            await self.queue.put(QueueItem(job.id))
+        LOG.info(
+            'Restored interrupted work: %s download(s), %s extraction(s)',
+            len(download_jobs), len(extract_jobs),
+            extra={'stage': 'startup'},
+        )
         dashboard=Dashboard(self.s,self.db,self.passwords,self)
         server=uvicorn.Server(uvicorn.Config(dashboard.app,host=self.s.host,port=self.s.port,log_config=None,access_log=False))
         worker=asyncio.create_task(self.worker(),name='job-dispatcher')

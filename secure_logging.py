@@ -108,4 +108,7 @@ def configure_logging(level: str, activity_log_path: Path | None = None) -> None
         activity.setLevel(logging.INFO)
         root.addHandler(activity)
     root.setLevel(level)
+    # Telethon "Got difference for channel…" is background sync noise, not job activity.
+    logging.getLogger("telethon").setLevel(logging.WARNING)
     logging.getLogger("telethon.network").setLevel(logging.WARNING)
+    logging.getLogger("telethon.client.updates").setLevel(logging.WARNING)
