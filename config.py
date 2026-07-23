@@ -78,7 +78,8 @@ def load_settings() -> Settings:
         data_root=Path(os.getenv("DATA_ROOT", "/data")).resolve(),
         # 0 disables the download size cap (recommended for large Telegram archives).
         max_download_bytes=non_negative_int("MAX_DOWNLOAD_BYTES", 0),
-        max_expanded_bytes=positive_int("MAX_EXPANDED_BYTES", 50 * 1024**3),
+        # 0 disables expanded-size cap; free disk remains the hard stop.
+        max_expanded_bytes=non_negative_int("MAX_EXPANDED_BYTES", 0),
         max_archive_files=positive_int("MAX_ARCHIVE_FILES", 50_000),
         max_scan_file_bytes=positive_int("MAX_SCAN_FILE_BYTES", 100 * 1024**2),
         max_nesting_depth=positive_int("MAX_NESTING_DEPTH", 3),
