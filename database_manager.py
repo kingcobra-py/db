@@ -154,23 +154,31 @@ class DatabaseManager:
 
     def restore_interrupted_jobs(self):
         """Legacy helper: pending jobs that already have downloaded files (ready to extract)."""
-        download_jobs, extract_jobs = self.restore_interrupted_work()
+        _, extract_jobs = self.restore_interrupted_work()
         return extract_jobs
 
     def restore_interrupted_work(self) -> tuple[list[dict[str, Any]], list[Job]]:
-        """Split interrupted work into download retries vs extraction retries.
+        """Prepare interrupted rows after restart.
 
-        Channel-link rows created on submit have empty input_files and only live in the
-        in-memory ingest queue. After a restart those rows must be re-enqueued for
-        download, not sent to the extractor (which would fail with 'No input files').
+        Channel-link downloads are claimed from the DB by the ingest worker (no
+        in-memory queue). Stale fetching/downloading rows with no files are reset
+        to queued. Only jobs that already have files are returned for extraction.
         """
         with self.connect() as db:
             db.execute(
                 "UPDATE jobs SET status='pending',error='Worker restarted',updated_at=CURRENT_TIMESTAMP "
                 "WHERE status='running'"
             )
+            # Re-open downloads that were mid-fetch when the process died.
+            db.execute(
+                """UPDATE jobs SET progress_stage='queued', progress_done=0, progress_total=0,
+                    progress_file='waiting', progress_index=0, progress_count=0,
+                    updated_at=CURRENT_TIMESTAMP
+                    WHERE status='pending' AND source='channel-link'
+                      AND progress_stage IN ('fetching','downloading')
+                      AND (input_files_json='[]' OR input_files_json='' OR input_files_json IS NULL)"""
+            )
             rows = list(db.execute("SELECT * FROM jobs WHERE status='pending' ORDER BY created_at,id"))
-        download_jobs: list[dict[str, Any]] = []
         extract_jobs: list[Job] = []
         for r in rows:
             files = json.loads(r["input_files_json"] or "[]")
@@ -180,20 +188,80 @@ class DatabaseManager:
                 extract_jobs.append(self._job(r))
                 continue
             if source == "channel-link" and source_link:
-                download_jobs.append({
-                    "job_id": int(r["id"]),
-                    "job_key": int(r["message_id"]),
-                    "url": str(source_link),
-                })
-            else:
-                # Pending with no files and nothing to re-fetch — mark failed.
+                # Ensure claimable by ingest worker.
                 with self.connect() as db:
                     db.execute(
-                        "UPDATE jobs SET status='failed', error=?, completed_at=CURRENT_TIMESTAMP, "
-                        "updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                        ("Interrupted before download completed", int(r["id"])),
+                        """UPDATE jobs SET progress_stage='queued', progress_file='waiting',
+                            updated_at=CURRENT_TIMESTAMP
+                            WHERE id=? AND status='pending'
+                              AND (progress_stage IS NULL OR progress_stage NOT IN ('queued','fetching','downloading'))""",
+                        (int(r["id"]),),
                     )
-        return download_jobs, extract_jobs
+                continue
+            with self.connect() as db:
+                db.execute(
+                    "UPDATE jobs SET status='failed', error=?, completed_at=CURRENT_TIMESTAMP, "
+                    "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    ("Interrupted before download completed", int(r["id"])),
+                )
+        return [], extract_jobs
+
+    def claim_next_channel_download(self) -> dict[str, Any] | None:
+        """Atomically claim the oldest queued channel-link download.
+
+        Marks it fetching in the same transaction so the dashboard updates even if
+        Telegram resolution hangs afterward.
+        """
+        with self.connect() as db:
+            # Recover claims stuck forever (process crash mid-fetch).
+            db.execute(
+                """UPDATE jobs SET progress_stage='queued', progress_file='waiting',
+                    progress_done=0, progress_total=0, updated_at=CURRENT_TIMESTAMP
+                    WHERE status='pending' AND source='channel-link'
+                      AND progress_stage IN ('fetching','downloading')
+                      AND (input_files_json='[]' OR input_files_json='' OR input_files_json IS NULL)
+                      AND updated_at < datetime('now', '-10 minutes')"""
+            )
+            row = db.execute(
+                """SELECT id, message_id, source_link FROM jobs
+                   WHERE status='pending' AND source='channel-link'
+                     AND source_link IS NOT NULL AND source_link != ''
+                     AND progress_stage='queued'
+                     AND (input_files_json='[]' OR input_files_json='' OR input_files_json IS NULL)
+                   ORDER BY id ASC LIMIT 1"""
+            ).fetchone()
+            if not row:
+                return None
+            job_id = int(row["id"])
+            cur = db.execute(
+                """UPDATE jobs SET progress_stage='fetching', progress_file='resolving message',
+                    progress_done=0, progress_total=0, progress_index=0, progress_count=0,
+                    updated_at=CURRENT_TIMESTAMP
+                    WHERE id=? AND status='pending' AND progress_stage='queued'""",
+                (job_id,),
+            )
+            if cur.rowcount != 1:
+                return None
+            waiting = db.execute(
+                """SELECT COUNT(*) AS n FROM jobs
+                   WHERE status='pending' AND source='channel-link' AND progress_stage='queued'
+                     AND (input_files_json='[]' OR input_files_json='' OR input_files_json IS NULL)"""
+            ).fetchone()["n"]
+            return {
+                "job_id": job_id,
+                "job_key": int(row["message_id"]),
+                "url": str(row["source_link"]),
+                "waiting": int(waiting),
+            }
+
+    def count_queued_channel_downloads(self) -> int:
+        with self.connect() as db:
+            row = db.execute(
+                """SELECT COUNT(*) AS n FROM jobs
+                   WHERE status='pending' AND source='channel-link' AND progress_stage='queued'
+                     AND (input_files_json='[]' OR input_files_json='' OR input_files_json IS NULL)"""
+            ).fetchone()
+            return int(row["n"] if row else 0)
 
     def mark_running(self,job_id):
         with self.connect() as db: db.execute("UPDATE jobs SET status='running',attempts=attempts+1,started_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP,error=NULL WHERE id=?",(job_id,))

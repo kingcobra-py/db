@@ -34,7 +34,6 @@ class Pipeline:
         self.s=s
         self.db=DatabaseManager(s.database_path,s.inbox_dir,s.work_dir,s.output_dir)
         self.queue:asyncio.Queue[QueueItem]=asyncio.Queue(maxsize=100)
-        self.ingest_queue:asyncio.Queue[dict]=asyncio.Queue(maxsize=500)
         self._lock_file=None
         self._acquire_session_lock()
         self.client=TelegramClient(StringSession(self._load_session_string()),s.api_id,s.api_hash)
@@ -43,6 +42,7 @@ class Pipeline:
         workers=max(1, min(24, self.db.get_extraction_workers(s.extraction_workers)))
         self.semaphore=asyncio.Semaphore(workers)
         self._stop_requested=asyncio.Event()
+        self._ingest_wakeup=asyncio.Event()
         self._active_tasks:set[asyncio.Task]=set()
         self._ingest_work_task:asyncio.Task|None=None
         self._stop_generation=0
@@ -259,11 +259,11 @@ class Pipeline:
             shutil.rmtree(inbox,ignore_errors=True); raise
 
     async def enqueue_channel_link(self, url: str) -> int:
-        """Create a visible pending job immediately, then queue the download."""
+        """Create a visible pending job; the DB-backed ingest worker will claim it."""
         job_key = self.web_job_id(url)
         job_id = await asyncio.to_thread(self.db.create_job, job_key, 0, 0, [], 'channel-link', url)
         await asyncio.to_thread(self.db.update_progress, job_id, 'queued', 0, 0, 'waiting', 0, 0)
-        await self.ingest_queue.put({'url': url, 'job_id': job_id, 'job_key': job_key})
+        self._ingest_wakeup.set()
         LOG.info('Channel link enqueued', extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest'})
         return job_id
 
@@ -271,13 +271,12 @@ class Pipeline:
         job_key = job_key if job_key is not None else self.web_job_id(url)
         if job_id is None:
             job_id = await asyncio.to_thread(self.db.create_job, job_key, 0, 0, [], 'channel-link', url)
+            await asyncio.to_thread(self.db.update_progress, job_id, 'fetching', 0, 0, 'resolving message', 0, 0)
         try:
             current = await asyncio.to_thread(self.db.get_job, job_id)
             if not current or current.status not in {'pending', 'running'}:
                 LOG.info('Skipping stopped ingest job', extra={'job_id': job_id, 'stage': 'web-ingest'})
                 return
-            # Leave "queued" as soon as work starts so the dashboard is not stuck forever.
-            await asyncio.to_thread(self.db.update_progress, job_id, 'fetching', 0, 0, 'resolving message', 0, 0)
             LOG.info('Starting channel ingest', extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest'})
             target,message_id=self.validate_channel_link(url)
             if target.startswith('c:'):
@@ -330,41 +329,43 @@ class Pipeline:
             await asyncio.to_thread(self.db.mark_failed,job_id,f'{type(exc).__name__}: {exc}')
 
     async def ingest_worker(self):
-        """Serialize channel-link downloads to avoid Telegram flood / retry storms."""
+        """Claim queued channel-link jobs from SQLite and download them one at a time."""
         LOG.info('Channel ingest worker online', extra={'stage': 'startup'})
         while True:
-            item = await self.ingest_queue.get()
-            # Backward-compatible if a bare URL string ever appears.
-            if isinstance(item, str):
-                item = {'url': item, 'job_id': None, 'job_key': None}
             try:
                 if self._stop_requested.is_set():
-                    if item.get('job_id') is not None:
-                        await asyncio.to_thread(self.db.mark_failed, item['job_id'], 'Stopped by operator')
+                    await asyncio.sleep(0.5)
                     continue
-                qsize = self.ingest_queue.qsize()
+                item = await asyncio.to_thread(self.db.claim_next_channel_download)
+                if not item:
+                    self._ingest_wakeup.clear()
+                    try:
+                        await asyncio.wait_for(self._ingest_wakeup.wait(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
                 LOG.info(
-                    'Ingest worker picked job (%s still waiting)',
-                    qsize,
-                    extra={'job_id': item.get('job_id'), 'stage': 'web-ingest'},
+                    'Ingest worker claimed job (%s still queued)',
+                    item.get('waiting', 0),
+                    extra={'job_id': item['job_id'], 'stage': 'web-ingest'},
                 )
                 work = asyncio.create_task(
-                    self.ingest_channel_link(item['url'], item.get('job_id'), item.get('job_key')),
-                    name=f"ingest-{item.get('job_id')}",
+                    self.ingest_channel_link(item['url'], item['job_id'], item['job_key']),
+                    name=f"ingest-{item['job_id']}",
                 )
                 self._ingest_work_task = work
                 try:
                     await work
                 except asyncio.CancelledError:
-                    LOG.info('Ingest cancelled by stop', extra={'job_id': item.get('job_id'), 'stage': 'web-ingest'})
+                    LOG.info('Ingest cancelled by stop', extra={'job_id': item['job_id'], 'stage': 'web-ingest'})
                 finally:
                     if self._ingest_work_task is work:
                         self._ingest_work_task = None
-                # Small pacing gap between channel fetches.
                 if not self._stop_requested.is_set():
-                    await asyncio.sleep(1.25)
-            finally:
-                self.ingest_queue.task_done()
+                    await asyncio.sleep(1.0)
+            except Exception:
+                LOG.exception('Ingest worker loop error; continuing', extra={'stage': 'web-ingest'})
+                await asyncio.sleep(2.0)
 
     def register(self):
         @self.client.on(events.Album)
@@ -465,15 +466,12 @@ class Pipeline:
             task.add_done_callback(self._active_tasks.discard)
 
     async def request_stop_all(self) -> int:
-        """Cancel active downloads/extractions and mark pending/running jobs failed.
-
-        Also drains the ingest queue so a re-submit is not stuck behind a cancelled download.
-        """
+        """Cancel active downloads/extractions and mark pending/running jobs failed."""
         self._stop_generation += 1
         self._stop_requested.set()
         count = await asyncio.to_thread(self.db.stop_all_jobs)
 
-        # Abort the in-flight Telegram download/fetch (this was previously left running).
+        # Abort the in-flight Telegram download/fetch.
         work = self._ingest_work_task
         if work is not None and not work.done():
             work.cancel()
@@ -485,20 +483,6 @@ class Pipeline:
         for task in list(self._active_tasks):
             task.cancel()
 
-        # Drop anything still waiting to ingest so Stop → re-queue starts fresh.
-        drained = 0
-        while True:
-            try:
-                item = self.ingest_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            drained += 1
-            try:
-                if isinstance(item, dict) and item.get('job_id') is not None:
-                    await asyncio.to_thread(self.db.mark_failed, item['job_id'], 'Stopped by operator')
-            finally:
-                self.ingest_queue.task_done()
-
         # Drop extraction queue items; DB rows are already marked failed.
         while True:
             try:
@@ -509,10 +493,8 @@ class Pipeline:
                 self.queue.task_done()
 
         self._stop_requested.clear()
-        LOG.info(
-            'Stop-all requested',
-            extra={'stage': 'control', 'stopped': count, 'drained_ingest': drained},
-        )
+        self._ingest_wakeup.set()
+        LOG.info('Stop-all requested', extra={'stage': 'control', 'stopped': count})
         return count
 
     async def run(self):
@@ -525,17 +507,13 @@ class Pipeline:
             except OSError: pass
             raise
         self._persist_session_string()
-        download_jobs, extract_jobs = await asyncio.to_thread(self.db.restore_interrupted_work)
-        for item in download_jobs:
-            await asyncio.to_thread(
-                self.db.update_progress, item['job_id'], 'queued', 0, 0, 'waiting', 0, 0,
-            )
-            await self.ingest_queue.put(item)
+        _, extract_jobs = await asyncio.to_thread(self.db.restore_interrupted_work)
+        queued = await asyncio.to_thread(self.db.count_queued_channel_downloads)
         for job in extract_jobs:
             await self.queue.put(QueueItem(job.id))
         LOG.info(
-            'Restored interrupted work: %s download(s), %s extraction(s)',
-            len(download_jobs), len(extract_jobs),
+            'Restored interrupted work: %s queued download(s), %s extraction(s)',
+            queued, len(extract_jobs),
             extra={'stage': 'startup'},
         )
         dashboard=Dashboard(self.s,self.db,self.passwords,self)
@@ -543,6 +521,7 @@ class Pipeline:
         worker=asyncio.create_task(self.worker(),name='job-dispatcher')
         ingest=asyncio.create_task(self.ingest_worker(),name='channel-ingest-worker')
         web=asyncio.create_task(server.serve(),name='web-dashboard')
+        self._ingest_wakeup.set()
         LOG.info('Telegram scanner and web dashboard started', extra={'stage': 'startup'})
         try: await self.client.run_until_disconnected()
         finally:
