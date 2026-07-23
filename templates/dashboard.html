@@ -41,7 +41,7 @@
       </article>
 
       <section class="panel jobs-panel">
-        <div class="panel-head jobs-head"><div><p class="eyebrow">Activity</p><h2>Recent jobs</h2><p class="muted panel-subtitle">Live download and scan status{% if ingest %} · {% if ingest.active %}downloading #{{ ingest.active.job_id }} ({{ ingest.active.stage }}){% else %}ingest idle{% endif %} · {{ ingest.queued }} queued{% endif %}</p></div><div class="panel-actions"><button class="button secondary compact refresh" type="button">Refresh</button><form method="post" action="/jobs/stop-all" data-confirm="Stop all running and pending jobs?"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="button danger-soft compact" type="submit">Stop active</button></form></div></div>
+        <div class="panel-head jobs-head"><div><p class="eyebrow">Activity</p><h2>Recent jobs</h2><p class="muted panel-subtitle">Live download and scan status{% if ingest %} · {{ ingest.active_count }} downloading · {{ ingest.queued }} queued{% endif %}</p></div><div class="panel-actions"><button class="button secondary compact refresh" type="button">Refresh</button><form method="post" action="/jobs/stop-all" data-confirm="Stop all running and pending jobs?"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="button danger-soft compact" type="submit">Stop active</button></form></div></div>
         <div class="job-list">
           {% for job in jobs %}
           <article class="job-card" data-job-id="{{ job.id }}" data-job-status="{{ job.status }}">

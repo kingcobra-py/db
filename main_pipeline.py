@@ -41,9 +41,9 @@ class Pipeline:
         self.extractor=ArchiveProcessor(s,self.passwords.list_plain)
         workers=max(1, min(24, self.db.get_extraction_workers(s.extraction_workers)))
         self.semaphore=asyncio.Semaphore(workers)
+        self.ingest_workers=max(1, min(8, s.ingest_workers))
         self._stop_requested=asyncio.Event()
-        self._ingest_current_task:asyncio.Task|None=None
-        self._ingest_current_job_id:int|None=None
+        self._ingest_tasks:dict[int,asyncio.Task]={}
         self._ingest_supervisor_task:asyncio.Task|None=None
         self._active_tasks:set[asyncio.Task]=set()
         self._stop_generation=0
@@ -282,63 +282,65 @@ class Pipeline:
         )
 
     async def _schedule_pending_ingests(self) -> None:
-        """Start exactly one oldest pending download, with no semaphore waiters."""
+        """Start oldest pending downloads up to the configured parallel worker count."""
         self._ingest_worker_heartbeat = time.monotonic()
-        current = self._ingest_current_task
-        if current is not None and not current.done():
-            LOG.info(
-                'Ingest supervisor: job %s is active',
-                self._ingest_current_job_id,
-                extra={'job_id': self._ingest_current_job_id, 'stage': 'web-ingest'},
-            )
+        for job_id, task in list(self._ingest_tasks.items()):
+            if task.done():
+                self._ingest_tasks.pop(job_id, None)
+        available = self.ingest_workers - len(self._ingest_tasks)
+        if available <= 0:
             return
         pending = await asyncio.to_thread(self.db.pending_channel_downloads)
+        pending = [item for item in pending if item['job_id'] not in self._ingest_tasks]
         if not pending:
-            LOG.info('Ingest supervisor: no pending jobs', extra={'stage': 'web-ingest'})
             return
-        item = pending[0]
-        task = asyncio.create_task(
-            self._run_ingest_job(item['job_id'], item['job_key'], item['url']),
-            name=f"ingest-job-{item['job_id']}",
-        )
-        self._ingest_current_task = task
-        self._ingest_current_job_id = item['job_id']
+        started = pending[:available]
+        started_count = 0
+        for item in started:
+            claimed = await asyncio.to_thread(
+                self.db.mark_fetching_if_pending, item['job_id']
+            )
+            if not claimed:
+                continue
+            task = asyncio.create_task(
+                self._run_ingest_job(item['job_id'], item['job_key'], item['url']),
+                name=f"ingest-job-{item['job_id']}",
+            )
+            self._ingest_tasks[item['job_id']] = task
+            started_count += 1
+            task.add_done_callback(
+                lambda completed, jid=item['job_id']: self._ingest_done(jid, completed)
+            )
         LOG.info(
-            'Ingest supervisor started job %s (%s remain queued)',
-            item['job_id'], max(0, len(pending) - 1),
-            extra={'job_id': item['job_id'], 'stage': 'web-ingest'},
+            'Ingest supervisor started %s job(s): active=%s/%s queued=%s',
+            started_count, len(self._ingest_tasks), self.ingest_workers,
+            max(0, len(pending) - started_count),
+            extra={'stage': 'web-ingest'},
         )
 
-        def done(completed:asyncio.Task, jid:int=item['job_id']) -> None:
-            if self._ingest_current_task is completed:
-                self._ingest_current_task = None
-                self._ingest_current_job_id = None
-            if completed.cancelled():
-                LOG.info('Ingest job cancelled', extra={'job_id': jid, 'stage': 'web-ingest'})
-            else:
-                exc = completed.exception()
-                if exc is not None:
-                    LOG.error(
-                        'Ingest task crashed: %s', exc,
-                        extra={'job_id': jid, 'stage': 'web-ingest'},
-                    )
-            self.kick_ingest()
-
-        task.add_done_callback(done)
+    def _ingest_done(self, job_id:int, completed:asyncio.Task) -> None:
+        if self._ingest_tasks.get(job_id) is completed:
+            self._ingest_tasks.pop(job_id, None)
+        if completed.cancelled():
+            LOG.info('Ingest job cancelled', extra={'job_id': job_id, 'stage': 'web-ingest'})
+        else:
+            exc = completed.exception()
+            if exc is not None:
+                LOG.error(
+                    'Ingest task crashed: %s', exc,
+                    extra={'job_id': job_id, 'stage': 'web-ingest'},
+                )
+        self.kick_ingest()
 
     async def _run_ingest_job(self, job_id:int, job_key:int, url:str) -> None:
-        """Fetch and download this exact job; supervisor never starts a second one."""
+        """Fetch and download one job; supervisor limits total active task count."""
         if self._stop_requested.is_set():
             return
         current = await asyncio.to_thread(self.db.get_job, job_id)
         if not current or current.status != 'pending' or current.input_files:
             return
-        await asyncio.to_thread(
-            self.db.update_progress, job_id, 'fetching', 0, 0,
-            'resolving message', 0, 0,
-        )
         LOG.info(
-            'Ingest job started directly (no semaphore)',
+            'Parallel ingest job started',
             extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest'},
         )
         await self.ingest_channel_link(url, job_id, job_key)
@@ -524,12 +526,12 @@ class Pipeline:
         self._stop_requested.set()
         count = await asyncio.to_thread(self.db.stop_all_jobs)
 
-        current_ingest = self._ingest_current_task
-        if current_ingest is not None and not current_ingest.done():
-            current_ingest.cancel()
-            await asyncio.gather(current_ingest, return_exceptions=True)
-        self._ingest_current_task = None
-        self._ingest_current_job_id = None
+        ingest_tasks = list(self._ingest_tasks.values())
+        for task in ingest_tasks:
+            task.cancel()
+        if ingest_tasks:
+            await asyncio.gather(*ingest_tasks, return_exceptions=True)
+        self._ingest_tasks.clear()
         supervisor = self._ingest_supervisor_task
         if supervisor is not None and not supervisor.done():
             supervisor.cancel()

@@ -165,6 +165,8 @@ class Dashboard:
                 payload.update({
                     'ingest_queued': ingest.get('queued', 0),
                     'ingest_active': ingest.get('active'),
+                    'ingest_active_count': ingest.get('active_count', 0),
+                    'ingest_workers': getattr(self.pipeline, 'ingest_workers', 1),
                     'ingest_heartbeat_age_s': (None if not hb else round(max(0.0, time.monotonic() - hb), 2)),
                 })
             return payload

@@ -44,7 +44,7 @@ class Settings:
     max_archive_files: int; max_scan_file_bytes: int
     max_nesting_depth: int; min_free_bytes: int
     extraction_timeout_seconds: int
-    extraction_workers: int
+    extraction_workers: int; ingest_workers: int
     fingerprint_key: bytes
     dashboard_password: str; dashboard_secret: bytes
     password_encryption_key: bytes
@@ -86,6 +86,8 @@ def load_settings() -> Settings:
         min_free_bytes=positive_int("MIN_FREE_BYTES", 1024**3),
         extraction_timeout_seconds=positive_int("EXTRACTION_TIMEOUT_SECONDS", 1800),
         extraction_workers=min(positive_int("EXTRACTION_WORKERS", 1), 24),
+        # Bounded to reduce Telegram flood-waits and concurrent disk pressure.
+        ingest_workers=min(positive_int("INGEST_WORKERS", 3), 8),
         fingerprint_key=required("FINGERPRINT_KEY").encode(),
         dashboard_password=required("DASHBOARD_PASSWORD"), dashboard_secret=required("DASHBOARD_SECRET").encode(),
         password_encryption_key=required("PASSWORD_ENCRYPTION_KEY").encode(),

@@ -60,7 +60,10 @@ Open `http://localhost:8000`. Local HTTP cookies work when no `X-Forwarded-Proto
 6. Deploy. Railway exposes the `PORT` used by the dashboard.
 7. Generate a Railway domain and open it over HTTPS.
 
-The same process runs Uvicorn, Telethon, and one sequential `asyncio.Queue` consumer. Do not launch `uvicorn` separately.
+The same process runs Uvicorn, Telethon, the download supervisor, and extraction workers. Do not launch `uvicorn` separately.
+
+`INGEST_WORKERS` controls parallel Telegram downloads (default `3`, maximum `8`).
+Use a lower value if Telegram returns flood-wait errors or storage bandwidth is limited.
 
 ## Dashboard use
 
