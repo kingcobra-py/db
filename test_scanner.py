@@ -114,6 +114,18 @@ class SecurityTests(unittest.TestCase):
             db.create_job(7, 0, 0, ["a.zip"], "channel-link", "https://t.me/x/1")
             self.assertEqual(db.get_job(job_id).status, "failed")
 
+    def test_restore_splits_download_and_extract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            download_id = db.create_job(11, 0, 0, [], "channel-link", "https://t.me/channel/11")
+            db.update_progress(download_id, "queued", 0, 0, "waiting", 0, 0)
+            extract_id = db.create_job(12, 0, 0, ["/data/inbox/12/a.zip"], "channel-link", "https://t.me/channel/12")
+            download_jobs, extract_jobs = db.restore_interrupted_work()
+            self.assertEqual([j["job_id"] for j in download_jobs], [download_id])
+            self.assertEqual(download_jobs[0]["url"], "https://t.me/channel/11")
+            self.assertEqual([j.id for j in extract_jobs], [extract_id])
+
 
 if __name__ == "__main__":
     unittest.main()

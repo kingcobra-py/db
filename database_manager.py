@@ -153,9 +153,47 @@ class DatabaseManager:
             r=db.execute("SELECT * FROM jobs WHERE id=?",(job_id,)).fetchone(); return self._job(r) if r else None
 
     def restore_interrupted_jobs(self):
+        """Legacy helper: pending jobs that already have downloaded files (ready to extract)."""
+        download_jobs, extract_jobs = self.restore_interrupted_work()
+        return extract_jobs
+
+    def restore_interrupted_work(self) -> tuple[list[dict[str, Any]], list[Job]]:
+        """Split interrupted work into download retries vs extraction retries.
+
+        Channel-link rows created on submit have empty input_files and only live in the
+        in-memory ingest queue. After a restart those rows must be re-enqueued for
+        download, not sent to the extractor (which would fail with 'No input files').
+        """
         with self.connect() as db:
-            db.execute("UPDATE jobs SET status='pending',error='Worker restarted',updated_at=CURRENT_TIMESTAMP WHERE status='running'")
-            return [self._job(r) for r in db.execute("SELECT * FROM jobs WHERE status='pending' ORDER BY created_at,id")]
+            db.execute(
+                "UPDATE jobs SET status='pending',error='Worker restarted',updated_at=CURRENT_TIMESTAMP "
+                "WHERE status='running'"
+            )
+            rows = list(db.execute("SELECT * FROM jobs WHERE status='pending' ORDER BY created_at,id"))
+        download_jobs: list[dict[str, Any]] = []
+        extract_jobs: list[Job] = []
+        for r in rows:
+            files = json.loads(r["input_files_json"] or "[]")
+            source = str(r["source"] or "telegram")
+            source_link = r["source_link"]
+            if files:
+                extract_jobs.append(self._job(r))
+                continue
+            if source == "channel-link" and source_link:
+                download_jobs.append({
+                    "job_id": int(r["id"]),
+                    "job_key": int(r["message_id"]),
+                    "url": str(source_link),
+                })
+            else:
+                # Pending with no files and nothing to re-fetch — mark failed.
+                with self.connect() as db:
+                    db.execute(
+                        "UPDATE jobs SET status='failed', error=?, completed_at=CURRENT_TIMESTAMP, "
+                        "updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        ("Interrupted before download completed", int(r["id"])),
+                    )
+        return download_jobs, extract_jobs
 
     def mark_running(self,job_id):
         with self.connect() as db: db.execute("UPDATE jobs SET status='running',attempts=attempts+1,started_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP,error=NULL WHERE id=?",(job_id,))
