@@ -192,6 +192,15 @@ class Pipeline:
                 filename=Path(getattr(message.file,'name',None) or f'upload-{index}.bin').name
                 destination=inbox/filename
                 if destination.exists(): destination=inbox/f'{index}-{filename}'
+                # MAX_DOWNLOAD_BYTES is advisory only (0 = ignore). Free disk is the hard stop.
+                # Do not fail jobs for large Telegram archives that exceed an old 2GiB env value.
+                reported = getattr(getattr(message, 'file', None), 'size', None)
+                if self.s.max_download_bytes > 0 and isinstance(reported, int) and reported > self.s.max_download_bytes:
+                    LOG.warning(
+                        'File %s reported size %s exceeds MAX_DOWNLOAD_BYTES=%s; continuing download',
+                        filename, reported, self.s.max_download_bytes,
+                        extra={'job_id': job_id, 'message_id': job_key, 'stage': 'download'},
+                    )
                 await asyncio.to_thread(self.db.update_progress,job_id,'downloading',0,0,filename,index,file_count)
                 await message.download_media(
                     file=str(destination),
@@ -199,8 +208,12 @@ class Pipeline:
                 )
                 size=destination.stat().st_size
                 total+=size
-                if total > self.s.max_download_bytes:
-                    raise ValueError(f'Download exceeds MAX_DOWNLOAD_BYTES ({self.s.max_download_bytes} bytes)')
+                if self.s.max_download_bytes > 0 and size > self.s.max_download_bytes:
+                    LOG.warning(
+                        'File %s size %s exceeds MAX_DOWNLOAD_BYTES=%s; continuing',
+                        filename, size, self.s.max_download_bytes,
+                        extra={'job_id': job_id, 'message_id': job_key, 'stage': 'download'},
+                    )
                 available = shutil.disk_usage(self.s.inbox_dir).free
                 if available <= self.s.min_free_bytes:
                     raise ValueError('Insufficient disk space')
@@ -211,7 +224,11 @@ class Pipeline:
             await asyncio.to_thread(self.db.clear_progress,job_id)
             await self.queue.put(QueueItem(job_id))
             if notify: await self.notify(chat_id,f'✅ Downloaded {len(files)} file(s); queued.',messages[0].id)
-            LOG.info('Download finished and queued for extraction', extra={'job_id': job_id, 'message_id': job_key, 'stage': 'download'})
+            LOG.info(
+                'Download finished and queued for extraction (%s file(s), %s)',
+                len(files), self._human(total),
+                extra={'job_id': job_id, 'message_id': job_key, 'stage': 'download'},
+            )
             return job_id
         except Exception:
             await asyncio.to_thread(self.db.clear_progress,job_id)
