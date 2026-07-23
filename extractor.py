@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
 import subprocess
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from config import Settings
+
+LOG = logging.getLogger("extractor")
 
 SUPPORTED = re.compile(r"(?i).*(?:\.zip|\.7z|\.rar|\.tar|\.tgz|\.txz|\.tar\.gz|\.tar\.xz|\.gz|\.xz|\.7z\.\d{3}|\.zip\.\d{3}|\.z\d{2}|\.part\d+\.rar|\.r\d{2})$")
 FIRST_7Z = re.compile(r"(?i).*\.7z\.001$")
@@ -236,9 +239,15 @@ class ArchiveProcessor:
                 path.resolve().relative_to(resolved_root)
             except ValueError as exc:
                 raise ExtractionError("Extracted path escaped work directory") from exc
-            if path.is_file(): total += stat.st_size
-            if total > self.s.max_expanded_bytes:
-                raise ExtractionError("Actual expanded-size limit exceeded")
+            if path.is_file():
+                total += stat.st_size
+            # MAX_EXPANDED_BYTES is advisory (0 disables). Free disk is the hard stop.
+            if self.s.max_expanded_bytes > 0 and total > self.s.max_expanded_bytes:
+                LOG.warning(
+                    "Extracted size %s exceeds MAX_EXPANDED_BYTES=%s under %s; continuing",
+                    total, self.s.max_expanded_bytes, root,
+                )
+                # Do not abort — large Telegram log packs routinely exceed old 5GiB env caps.
         return count, total
 
     def _extract_with_unrar(self, archive: Path, destination: Path, passwords: list[str | None]) -> None:
@@ -338,6 +347,22 @@ class ArchiveProcessor:
         shutil.rmtree(destination, ignore_errors=True)
         raise ExtractionError(f"Could not safely extract {archive.name}: {last_error}")
 
+    @staticmethod
+    def _should_fallback_from_unrar(error: ExtractionError) -> bool:
+        """Only fall back to 7z for codec/tool issues — not size/password/safety failures."""
+        text = str(error).lower()
+        if any(token in text for token in (
+            "expanded-size",
+            "file-count",
+            "insufficient free disk",
+            "wrong password",
+            "password required",
+            "escaped work directory",
+            "links are not allowed",
+        )):
+            return False
+        return True
+
     def _extract(self, archive: Path, destination: Path, passwords: list[str | None]) -> None:
         """Extract archive with password testing.
 
@@ -349,7 +374,9 @@ class ArchiveProcessor:
                 self._extract_with_unrar(archive, destination, passwords)
                 return
             except ExtractionError as rar_exc:
-                # Fall through to 7z only when unrar itself is missing codecs (rare).
+                if not self._should_fallback_from_unrar(rar_exc):
+                    raise
+                # Fall through to 7z only for rare unrar codec/tool failures.
                 last_rar = str(rar_exc)
                 try:
                     self._extract_with_7z(archive, destination, passwords)
