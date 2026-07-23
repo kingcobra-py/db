@@ -290,6 +290,32 @@ class DatabaseManager:
                 queued += 1
         return {"queued": queued, "active": active}
 
+    def pending_channel_downloads(self) -> list[dict[str, Any]]:
+        """Return channel-link jobs that still need their Telegram media downloaded."""
+        with self.connect() as db:
+            rows = list(db.execute(
+                """SELECT id, message_id, source_link, input_files_json, progress_stage
+                   FROM jobs
+                   WHERE status='pending' AND source='channel-link'
+                     AND source_link IS NOT NULL AND TRIM(source_link) != ''
+                   ORDER BY id ASC"""
+            ))
+        pending: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                files = json.loads(row["input_files_json"] or "[]")
+            except (TypeError, ValueError):
+                files = []
+            if files:
+                continue
+            pending.append({
+                "job_id": int(row["id"]),
+                "job_key": int(row["message_id"]),
+                "url": str(row["source_link"]).strip(),
+                "stage": str(row["progress_stage"] or "queued"),
+            })
+        return pending
+
     def count_queued_channel_downloads(self) -> int:
         return int(self.ingest_status()["queued"])
 

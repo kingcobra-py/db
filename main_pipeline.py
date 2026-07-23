@@ -42,11 +42,10 @@ class Pipeline:
         workers=max(1, min(24, self.db.get_extraction_workers(s.extraction_workers)))
         self.semaphore=asyncio.Semaphore(workers)
         self._stop_requested=asyncio.Event()
-        self._ingest_wakeup=asyncio.Event()
-        self._ingest_lock=asyncio.Lock()
+        self._ingest_slots=asyncio.Semaphore(1)
+        self._ingest_tasks:dict[int,asyncio.Task]={}
+        self._ingest_supervisor_task:asyncio.Task|None=None
         self._active_tasks:set[asyncio.Task]=set()
-        self._ingest_work_task:asyncio.Task|None=None
-        self._ingest_kick_task:asyncio.Task|None=None
         self._stop_generation=0
         self._ingest_worker_heartbeat=0.0
 
@@ -262,62 +261,80 @@ class Pipeline:
             shutil.rmtree(inbox,ignore_errors=True); raise
 
     async def enqueue_channel_link(self, url: str) -> int:
-        """Create a visible pending job and immediately kick the download pump."""
+        """Create a visible pending job and immediately schedule its download."""
         job_key = self.web_job_id(url)
         job_id = await asyncio.to_thread(self.db.create_job, job_key, 0, 0, [], 'channel-link', url)
         await asyncio.to_thread(self.db.update_progress, job_id, 'queued', 0, 0, 'waiting', 0, 0)
-        self._ingest_wakeup.set()
-        self.kick_ingest()
+        self._schedule_ingest_job(job_id, job_key, url)
         LOG.info('Channel link enqueued', extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest'})
         return job_id
 
     def kick_ingest(self) -> None:
-        """Ensure a download pump is scheduled on the running event loop.
-
-        Web requests use this so downloads start even if the background worker task
-        is stalled behind Telethon update handling.
-        """
+        """Reconcile DB pending rows with tracked per-job download tasks."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        if self._ingest_kick_task is not None and not self._ingest_kick_task.done():
-            self._ingest_wakeup.set()
+        if self._ingest_supervisor_task is not None and not self._ingest_supervisor_task.done():
             return
-        self._ingest_kick_task = loop.create_task(self._ingest_pump(), name='ingest-kick')
+        self._ingest_supervisor_task = loop.create_task(
+            self._schedule_pending_ingests(), name='ingest-supervisor'
+        )
 
-    async def _ingest_pump(self) -> None:
-        """Claim and run queued downloads until none remain."""
-        processed = 0
-        while not self._stop_requested.is_set():
-            async with self._ingest_lock:
-                item = await asyncio.to_thread(self.db.claim_next_channel_download)
-                if not item:
-                    if processed == 0:
-                        status = await asyncio.to_thread(self.db.ingest_status)
-                        LOG.info(
-                            'Ingest pump idle (queued=%s active=%s)',
-                            status.get('queued'), status.get('active'),
-                            extra={'stage': 'web-ingest'},
-                        )
-                    break
-                LOG.info(
-                    'Ingest pump claimed job (%s still queued)',
-                    item.get('waiting', 0),
-                    extra={'job_id': item['job_id'], 'stage': 'web-ingest'},
+    async def _schedule_pending_ingests(self) -> None:
+        """Schedule every pending DB row; the one-slot semaphore serializes downloads."""
+        self._ingest_worker_heartbeat = time.monotonic()
+        pending = await asyncio.to_thread(self.db.pending_channel_downloads)
+        for item in pending:
+            self._schedule_ingest_job(item['job_id'], item['job_key'], item['url'])
+        LOG.info(
+            'Ingest supervisor reconciled %s pending job(s), %s task(s) tracked',
+            len(pending), len(self._ingest_tasks),
+            extra={'stage': 'web-ingest'},
+        )
+
+    def _schedule_ingest_job(self, job_id:int, job_key:int, url:str) -> None:
+        existing = self._ingest_tasks.get(job_id)
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(
+            self._run_ingest_job(job_id, job_key, url),
+            name=f'ingest-job-{job_id}',
+        )
+        self._ingest_tasks[job_id] = task
+
+        def done(completed:asyncio.Task, jid:int=job_id) -> None:
+            if self._ingest_tasks.get(jid) is completed:
+                self._ingest_tasks.pop(jid, None)
+            if completed.cancelled():
+                return
+            exc = completed.exception()
+            if exc is not None:
+                LOG.error(
+                    'Ingest task crashed: %s', exc,
+                    extra={'job_id': jid, 'stage': 'web-ingest'},
                 )
-                self._ingest_work_task = asyncio.current_task()
-                try:
-                    await self.ingest_channel_link(item['url'], item['job_id'], item['job_key'])
-                    processed += 1
-                except asyncio.CancelledError:
-                    await asyncio.to_thread(self.db.mark_failed, item['job_id'], 'Stopped by operator')
-                    raise
-                finally:
-                    if self._ingest_work_task == asyncio.current_task():
-                        self._ingest_work_task = None
+
+        task.add_done_callback(done)
+
+    async def _run_ingest_job(self, job_id:int, job_key:int, url:str) -> None:
+        """Wait for the sole download slot, then fetch and download this exact job."""
+        async with self._ingest_slots:
+            if self._stop_requested.is_set():
+                return
+            current = await asyncio.to_thread(self.db.get_job, job_id)
+            if not current or current.status != 'pending' or current.input_files:
+                return
+            await asyncio.to_thread(
+                self.db.update_progress, job_id, 'fetching', 0, 0,
+                'resolving message', 0, 0,
+            )
+            LOG.info(
+                'Ingest task acquired download slot',
+                extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest'},
+            )
+            await self.ingest_channel_link(url, job_id, job_key)
             await asyncio.sleep(0.75)
-        self._ingest_wakeup.set()
 
     async def ingest_channel_link(self,url:str, job_id:int|None=None, job_key:int|None=None):
         job_key = job_key if job_key is not None else self.web_job_id(url)
@@ -380,26 +397,19 @@ class Pipeline:
             LOG.exception('Channel link ingest failed',extra={'job_id': job_id, 'message_id':job_key,'stage':'web-ingest'})
             await asyncio.to_thread(self.db.mark_failed,job_id,f'{type(exc).__name__}: {exc}')
 
-    async def ingest_worker(self):
-        """Background loop — also relies on kick_ingest() from web requests."""
+    async def ingest_supervisor(self):
+        """Periodic reconciliation makes DB pending rows impossible to orphan."""
         LOG.info('Channel ingest worker online', extra={'stage': 'startup'})
         while True:
             try:
                 self._ingest_worker_heartbeat = time.monotonic()
-                if self._stop_requested.is_set():
-                    await asyncio.sleep(0.5)
-                    continue
-                # Reuse the same pump/lock path as web kicks.
-                await self._ingest_pump()
-                self._ingest_wakeup.clear()
-                try:
-                    await asyncio.wait_for(self._ingest_wakeup.wait(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    pass
+                if not self._stop_requested.is_set():
+                    await self._schedule_pending_ingests()
+                await asyncio.sleep(2.0)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                LOG.exception('Ingest worker loop error; continuing', extra={'stage': 'web-ingest'})
+                LOG.exception('Ingest supervisor loop error; continuing', extra={'stage': 'web-ingest'})
                 await asyncio.sleep(2.0)
 
     def register(self):
@@ -506,21 +516,17 @@ class Pipeline:
         self._stop_requested.set()
         count = await asyncio.to_thread(self.db.stop_all_jobs)
 
-        # Abort the in-flight Telegram download/fetch.
-        work = self._ingest_work_task
-        if work is not None and not work.done():
-            work.cancel()
-            try:
-                await work
-            except (asyncio.CancelledError, Exception):
-                pass
-        kick = self._ingest_kick_task
-        if kick is not None and not kick.done():
-            kick.cancel()
-            try:
-                await kick
-            except (asyncio.CancelledError, Exception):
-                pass
+        ingest_tasks = list(self._ingest_tasks.values())
+        for task in ingest_tasks:
+            task.cancel()
+        if ingest_tasks:
+            await asyncio.gather(*ingest_tasks, return_exceptions=True)
+        self._ingest_tasks.clear()
+        supervisor = self._ingest_supervisor_task
+        if supervisor is not None and not supervisor.done():
+            supervisor.cancel()
+            await asyncio.gather(supervisor, return_exceptions=True)
+        self._ingest_supervisor_task = None
 
         for task in list(self._active_tasks):
             task.cancel()
@@ -535,7 +541,6 @@ class Pipeline:
                 self.queue.task_done()
 
         self._stop_requested.clear()
-        self._ingest_wakeup.set()
         LOG.info('Stop-all requested', extra={'stage': 'control', 'stopped': count})
         return count
 
@@ -561,9 +566,9 @@ class Pipeline:
         dashboard=Dashboard(self.s,self.db,self.passwords,self)
         server=uvicorn.Server(uvicorn.Config(dashboard.app,host=self.s.host,port=self.s.port,log_config=None,access_log=False))
         worker=asyncio.create_task(self.worker(),name='job-dispatcher')
-        ingest=asyncio.create_task(self.ingest_worker(),name='channel-ingest-worker')
+        ingest=asyncio.create_task(self.ingest_supervisor(),name='channel-ingest-supervisor')
         web=asyncio.create_task(server.serve(),name='web-dashboard')
-        self._ingest_wakeup.set()
+        self.kick_ingest()
         LOG.info('Telegram scanner and web dashboard started', extra={'stage': 'startup'})
         try: await self.client.run_until_disconnected()
         finally:
