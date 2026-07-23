@@ -19,6 +19,13 @@ def positive_int(name: str, default: int) -> int:
     return value
 
 
+def non_negative_int(name: str, default: int) -> int:
+    value = int(os.getenv(name, str(default)))
+    if value < 0:
+        raise RuntimeError(f"{name} must be >= 0")
+    return value
+
+
 def parse_users() -> frozenset[int]:
     try:
         users = frozenset(int(x.strip()) for x in required("ALLOWED_USERS").split(",") if x.strip())
@@ -69,7 +76,8 @@ def load_settings() -> Settings:
         api_id=int(required("TELEGRAM_API_ID")), api_hash=required("TELEGRAM_API_HASH"),
         string_session=required("TELEGRAM_STRING_SESSION"), allowed_users=parse_users(),
         data_root=Path(os.getenv("DATA_ROOT", "/data")).resolve(),
-        max_download_bytes=positive_int("MAX_DOWNLOAD_BYTES", 100 * 1024**3),
+        # 0 disables the download size cap (recommended for large Telegram archives).
+        max_download_bytes=non_negative_int("MAX_DOWNLOAD_BYTES", 0),
         max_expanded_bytes=positive_int("MAX_EXPANDED_BYTES", 50 * 1024**3),
         max_archive_files=positive_int("MAX_ARCHIVE_FILES", 50_000),
         max_scan_file_bytes=positive_int("MAX_SCAN_FILE_BYTES", 100 * 1024**2),
