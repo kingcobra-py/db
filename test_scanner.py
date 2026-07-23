@@ -97,6 +97,18 @@ class SecurityTests(unittest.TestCase):
             self.assertEqual(data["files_scanned"], 3)
             self.assertEqual(data["findings"], 1)
 
+    def test_stopped_job_not_resurrected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            job_id = db.create_job(7, 0, 0, [], "channel-link", "https://t.me/x/1")
+            db.mark_failed(job_id, "Stopped by operator")
+            self.assertFalse(db.set_job_files_if_active(job_id, ["a.zip"]))
+            self.assertEqual(db.get_job(job_id).status, "failed")
+            # Conflict update must not reopen a failed row.
+            db.create_job(7, 0, 0, ["a.zip"], "channel-link", "https://t.me/x/1")
+            self.assertEqual(db.get_job(job_id).status, "failed")
+
 
 if __name__ == "__main__":
     unittest.main()
