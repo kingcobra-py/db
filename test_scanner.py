@@ -122,9 +122,15 @@ class SecurityTests(unittest.TestCase):
             db.update_progress(download_id, "queued", 0, 0, "waiting", 0, 0)
             extract_id = db.create_job(12, 0, 0, ["/data/inbox/12/a.zip"], "channel-link", "https://t.me/channel/12")
             download_jobs, extract_jobs = db.restore_interrupted_work()
-            self.assertEqual([j["job_id"] for j in download_jobs], [download_id])
-            self.assertEqual(download_jobs[0]["url"], "https://t.me/channel/11")
+            self.assertEqual(download_jobs, [])
             self.assertEqual([j.id for j in extract_jobs], [extract_id])
+            self.assertEqual(db.count_queued_channel_downloads(), 1)
+            claimed = db.claim_next_channel_download()
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed["job_id"], download_id)
+            self.assertEqual(claimed["url"], "https://t.me/channel/11")
+            progress = db.progress_for_job(download_id)
+            self.assertEqual(progress["stage"], "fetching")
 
 
 if __name__ == "__main__":
