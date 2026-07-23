@@ -157,7 +157,17 @@ class Dashboard:
 
     def _routes(self):
         @self.app.get('/health')
-        async def health(): return {'ok':True}
+        async def health():
+            payload = {'ok': True}
+            if self.pipeline is not None:
+                ingest = await asyncio.to_thread(self.db.ingest_status)
+                hb = getattr(self.pipeline, '_ingest_worker_heartbeat', 0.0) or 0.0
+                payload.update({
+                    'ingest_queued': ingest.get('queued', 0),
+                    'ingest_active': ingest.get('active'),
+                    'ingest_heartbeat_age_s': (None if not hb else round(max(0.0, time.monotonic() - hb), 2)),
+                })
+            return payload
 
         @self.app.get('/login')
         async def login_page(request: Request):
@@ -184,11 +194,14 @@ class Dashboard:
         @self.app.get('/')
         async def home(request: Request,notice: str|None=None,error: str|None=None):
             if not self._authorized(request): return RedirectResponse('/login',303)
+            if self.pipeline is not None:
+                self.pipeline.kick_ingest()
             stats=await asyncio.to_thread(self.db.stats); jobs=await asyncio.to_thread(self.db.recent,30)
             passwords=await asyncio.to_thread(self.passwords.list_masked)
             storage_bytes=await asyncio.to_thread(self.db.get_total_compressed_size)
             extraction_workers=await asyncio.to_thread(self.db.get_extraction_workers,self.s.extraction_workers)
-            return self.templates.TemplateResponse(request=request,name='dashboard.html',context={'stats':stats,'jobs':jobs,'passwords':passwords,'csrf':self._csrf(request),'notice':notice,'error':error,'storage_bytes':storage_bytes,'storage_human':_human(storage_bytes),'extraction_workers':extraction_workers})
+            ingest=await asyncio.to_thread(self.db.ingest_status)
+            return self.templates.TemplateResponse(request=request,name='dashboard.html',context={'stats':stats,'jobs':jobs,'passwords':passwords,'csrf':self._csrf(request),'notice':notice,'error':error,'storage_bytes':storage_bytes,'storage_human':_human(storage_bytes),'extraction_workers':extraction_workers,'ingest':ingest})
 
         @self.app.get('/storage-info')
         async def storage_info(request: Request):
@@ -282,6 +295,8 @@ class Dashboard:
         @self.app.get('/jobs/{job_id}/progress')
         async def job_progress(job_id: int,request: Request):
             self._require(request)
+            if self.pipeline is not None:
+                self.pipeline.kick_ingest()
             data=await asyncio.to_thread(self.db.progress_for_job,job_id)
             if data is None: raise HTTPException(404,'Job not found')
             pct=int(data['done']*100/data['total']) if data['total'] else 0

@@ -219,49 +219,79 @@ class DatabaseManager:
                     progress_done=0, progress_total=0, updated_at=CURRENT_TIMESTAMP
                     WHERE status='pending' AND source='channel-link'
                       AND progress_stage IN ('fetching','downloading')
-                      AND (input_files_json='[]' OR input_files_json='' OR input_files_json IS NULL)
                       AND updated_at < datetime('now', '-10 minutes')"""
             )
-            row = db.execute(
-                """SELECT id, message_id, source_link FROM jobs
+            # Pull a small batch and filter in Python — avoids brittle SQL on input_files_json.
+            rows = list(db.execute(
+                """SELECT id, message_id, source_link, input_files_json, progress_stage
+                   FROM jobs
                    WHERE status='pending' AND source='channel-link'
-                     AND source_link IS NOT NULL AND source_link != ''
-                     AND progress_stage='queued'
-                     AND (input_files_json='[]' OR input_files_json='' OR input_files_json IS NULL)
-                   ORDER BY id ASC LIMIT 1"""
-            ).fetchone()
-            if not row:
+                     AND source_link IS NOT NULL AND TRIM(source_link) != ''
+                   ORDER BY id ASC LIMIT 50"""
+            ))
+            target = None
+            waiting = 0
+            for row in rows:
+                try:
+                    files = json.loads(row["input_files_json"] or "[]")
+                except (TypeError, ValueError):
+                    files = []
+                if files:
+                    continue
+                stage = (row["progress_stage"] or "queued").strip().lower()
+                if stage in {"fetching", "downloading"}:
+                    continue
+                # Treat NULL/empty/waiting/queued as claimable.
+                if target is None:
+                    target = row
+                else:
+                    waiting += 1
+            if target is None:
                 return None
-            job_id = int(row["id"])
+            job_id = int(target["id"])
             cur = db.execute(
                 """UPDATE jobs SET progress_stage='fetching', progress_file='resolving message',
                     progress_done=0, progress_total=0, progress_index=0, progress_count=0,
                     updated_at=CURRENT_TIMESTAMP
-                    WHERE id=? AND status='pending' AND progress_stage='queued'""",
+                    WHERE id=? AND status='pending'
+                      AND (progress_stage IS NULL OR LOWER(progress_stage) NOT IN ('fetching','downloading'))""",
                 (job_id,),
             )
             if cur.rowcount != 1:
                 return None
-            waiting = db.execute(
-                """SELECT COUNT(*) AS n FROM jobs
-                   WHERE status='pending' AND source='channel-link' AND progress_stage='queued'
-                     AND (input_files_json='[]' OR input_files_json='' OR input_files_json IS NULL)"""
-            ).fetchone()["n"]
             return {
                 "job_id": job_id,
-                "job_key": int(row["message_id"]),
-                "url": str(row["source_link"]),
-                "waiting": int(waiting),
+                "job_key": int(target["message_id"]),
+                "url": str(target["source_link"]).strip(),
+                "waiting": waiting,
             }
 
-    def count_queued_channel_downloads(self) -> int:
+    def ingest_status(self) -> dict[str, Any]:
+        """Snapshot for dashboard/health: queued vs active download rows."""
         with self.connect() as db:
-            row = db.execute(
-                """SELECT COUNT(*) AS n FROM jobs
-                   WHERE status='pending' AND source='channel-link' AND progress_stage='queued'
-                     AND (input_files_json='[]' OR input_files_json='' OR input_files_json IS NULL)"""
-            ).fetchone()
-            return int(row["n"] if row else 0)
+            rows = list(db.execute(
+                """SELECT id, progress_stage, input_files_json, source_link
+                   FROM jobs WHERE status='pending' AND source='channel-link'
+                   ORDER BY id ASC"""
+            ))
+        queued = 0
+        active = None
+        for row in rows:
+            try:
+                files = json.loads(row["input_files_json"] or "[]")
+            except (TypeError, ValueError):
+                files = []
+            if files:
+                continue
+            stage = (row["progress_stage"] or "queued").strip().lower()
+            if stage in {"fetching", "downloading"}:
+                active = {"job_id": int(row["id"]), "stage": stage}
+            else:
+                queued += 1
+        return {"queued": queued, "active": active}
+
+    def count_queued_channel_downloads(self) -> int:
+        return int(self.ingest_status()["queued"])
 
     def mark_running(self,job_id):
         with self.connect() as db: db.execute("UPDATE jobs SET status='running',attempts=attempts+1,started_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP,error=NULL WHERE id=?",(job_id,))
