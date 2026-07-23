@@ -34,7 +34,7 @@ class Pipeline:
         self.s=s
         self.db=DatabaseManager(s.database_path,s.inbox_dir,s.work_dir,s.output_dir)
         self.queue:asyncio.Queue[QueueItem]=asyncio.Queue(maxsize=100)
-        self.ingest_queue:asyncio.Queue[str]=asyncio.Queue(maxsize=500)
+        self.ingest_queue:asyncio.Queue[dict]=asyncio.Queue(maxsize=500)
         self._lock_file=None
         self._acquire_session_lock()
         self.client=TelegramClient(StringSession(self._load_session_string()),s.api_id,s.api_hash)
@@ -44,6 +44,8 @@ class Pipeline:
         self.semaphore=asyncio.Semaphore(workers)
         self._stop_requested=asyncio.Event()
         self._active_tasks:set[asyncio.Task]=set()
+        self._ingest_work_task:asyncio.Task|None=None
+        self._stop_generation=0
 
     def set_extraction_workers(self, workers: int) -> None:
         workers = max(1, min(24, int(workers)))
@@ -169,7 +171,7 @@ class Pipeline:
         try: await message.edit(text)
         except Exception: pass  # Ignore 'message not modified', flood-wait, etc.
 
-    async def queue_messages(self,*,messages:list,job_key:int,chat_id:int,user_id:int,source:str,source_link:str|None=None,notify:bool=True):
+    async def queue_messages(self,*,messages:list,job_key:int,chat_id:int,user_id:int,source:str,source_link:str|None=None,notify:bool=True,existing_job_id:int|None=None):
         inbox=self.s.inbox_dir/str(job_key); inbox.mkdir(parents=True,exist_ok=True,mode=0o700)
         media_messages=[m for m in messages if m.media]
         file_count=len(media_messages)
@@ -178,16 +180,26 @@ class Pipeline:
             progress=await self.notify(chat_id,f'📥 Authorized upload received. Downloading {file_count} file(s)…',messages[0].id if messages else None)
         # Create the job row up front (empty files, still 'pending') so the web
         # dashboard has something to poll while the download is running.
-        job_id=await asyncio.to_thread(self.db.create_job,job_key,chat_id,user_id,[],source,source_link)
+        if existing_job_id is not None:
+            job_id=existing_job_id
+            current=await asyncio.to_thread(self.db.get_job,job_id)
+            if not current or current.status not in {'pending','running'}:
+                raise ValueError('Stopped by operator')
+        else:
+            job_id=await asyncio.to_thread(self.db.create_job,job_key,chat_id,user_id,[],source,source_link)
         files=[]; total=0
+        stop_gen=self._stop_generation
         try:
-            if self._stop_requested.is_set():
+            if self._stop_requested.is_set() or stop_gen != self._stop_generation:
                 raise ValueError('Stopped by operator')
             available = shutil.disk_usage(self.s.inbox_dir).free
             if available <= self.s.min_free_bytes:
                 raise ValueError('Insufficient disk space before download')
             for index,message in enumerate(media_messages,1):
-                if self._stop_requested.is_set():
+                if self._stop_requested.is_set() or stop_gen != self._stop_generation:
+                    raise ValueError('Stopped by operator')
+                live=await asyncio.to_thread(self.db.get_job,job_id)
+                if not live or live.status not in {'pending','running'}:
                     raise ValueError('Stopped by operator')
                 filename=Path(getattr(message.file,'name',None) or f'upload-{index}.bin').name
                 destination=inbox/filename
@@ -201,11 +213,15 @@ class Pipeline:
                         filename, reported, self.s.max_download_bytes,
                         extra={'job_id': job_id, 'message_id': job_key, 'stage': 'download'},
                     )
-                await asyncio.to_thread(self.db.update_progress,job_id,'downloading',0,0,filename,index,file_count)
+                # Seed total from Telegram size when known so the UI bar appears immediately.
+                seed_total = int(reported) if isinstance(reported, int) and reported > 0 else 0
+                await asyncio.to_thread(self.db.update_progress,job_id,'downloading',0,seed_total,filename,index,file_count)
                 await message.download_media(
                     file=str(destination),
                     progress_callback=self._make_progress_callback(progress,job_id,index,file_count,filename),
                 )
+                if self._stop_requested.is_set() or stop_gen != self._stop_generation:
+                    raise ValueError('Stopped by operator')
                 size=destination.stat().st_size
                 total+=size
                 if self.s.max_download_bytes > 0 and size > self.s.max_download_bytes:
@@ -219,8 +235,11 @@ class Pipeline:
                     raise ValueError('Insufficient disk space')
                 files.append(str(destination))
             if not files: raise ValueError('Telegram message has no downloadable media')
-            # Fill in the downloaded files and re-queue as pending for the worker.
-            await asyncio.to_thread(self.db.create_job,job_key,chat_id,user_id,files,source,source_link)
+            live=await asyncio.to_thread(self.db.get_job,job_id)
+            if not live or live.status not in {'pending','running'}:
+                raise ValueError('Stopped by operator')
+            # Fill in the downloaded files without resurrecting a stopped/failed row.
+            await asyncio.to_thread(self.db.set_job_files_if_active,job_id,files)
             await asyncio.to_thread(self.db.clear_progress,job_id)
             await self.queue.put(QueueItem(job_id))
             if notify: await self.notify(chat_id,f'✅ Downloaded {len(files)} file(s); queued.',messages[0].id)
@@ -230,16 +249,33 @@ class Pipeline:
                 extra={'job_id': job_id, 'message_id': job_key, 'stage': 'download'},
             )
             return job_id
+        except asyncio.CancelledError:
+            await asyncio.to_thread(self.db.mark_failed,job_id,'Stopped by operator')
+            await asyncio.to_thread(self.db.clear_progress,job_id)
+            shutil.rmtree(inbox,ignore_errors=True)
+            raise
         except Exception:
             await asyncio.to_thread(self.db.clear_progress,job_id)
             shutil.rmtree(inbox,ignore_errors=True); raise
 
-    async def enqueue_channel_link(self, url: str) -> None:
-        await self.ingest_queue.put(url)
+    async def enqueue_channel_link(self, url: str) -> int:
+        """Create a visible pending job immediately, then queue the download."""
+        job_key = self.web_job_id(url)
+        job_id = await asyncio.to_thread(self.db.create_job, job_key, 0, 0, [], 'channel-link', url)
+        await asyncio.to_thread(self.db.update_progress, job_id, 'queued', 0, 0, 'waiting', 0, 0)
+        await self.ingest_queue.put({'url': url, 'job_id': job_id, 'job_key': job_key})
+        LOG.info('Channel link enqueued', extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest'})
+        return job_id
 
-    async def ingest_channel_link(self,url:str):
-        job_key=self.web_job_id(url)
+    async def ingest_channel_link(self,url:str, job_id:int|None=None, job_key:int|None=None):
+        job_key = job_key if job_key is not None else self.web_job_id(url)
+        if job_id is None:
+            job_id = await asyncio.to_thread(self.db.create_job, job_key, 0, 0, [], 'channel-link', url)
         try:
+            current = await asyncio.to_thread(self.db.get_job, job_id)
+            if not current or current.status not in {'pending', 'running'}:
+                LOG.info('Skipping stopped ingest job', extra={'job_id': job_id, 'stage': 'web-ingest'})
+                return
             target,message_id=self.validate_channel_link(url)
             entity=await self.client.get_entity(PeerChannel(int(target[2:]))) if target.startswith('c:') else await self.client.get_entity(target)
             message=await self.client.get_messages(entity,ids=message_id)
@@ -249,30 +285,48 @@ class Pipeline:
                 # Pull a wider nearby window so large albums are not truncated.
                 nearby=await self.client.get_messages(entity,limit=100,offset_id=message_id+50)
                 messages=sorted({m.id:m for m in [message,*nearby] if m and m.grouped_id==message.grouped_id and m.media}.values(),key=lambda m:m.id)
-            await self.queue_messages(messages=messages,job_key=job_key,chat_id=0,user_id=0,source='channel-link',source_link=url,notify=False)
-            LOG.info('Channel link queued',extra={'message_id':job_key,'stage':'web-ingest'})
+            await self.queue_messages(
+                messages=messages, job_key=job_key, chat_id=0, user_id=0,
+                source='channel-link', source_link=url, notify=False, existing_job_id=job_id,
+            )
+            LOG.info('Channel link queued',extra={'job_id': job_id, 'message_id':job_key,'stage':'web-ingest'})
+        except asyncio.CancelledError:
+            await asyncio.to_thread(self.db.mark_failed, job_id, 'Stopped by operator')
+            raise
         except FloodWaitError as exc:
-            LOG.warning('Flood wait during channel ingest; sleeping %ss', exc.seconds, extra={'message_id':job_key,'stage':'web-ingest'})
-            await asyncio.sleep(exc.seconds + 1)
-            job_id=await asyncio.to_thread(self.db.create_job,job_key,0,0,[],'channel-link',url)
+            LOG.warning('Flood wait during channel ingest; sleeping %ss', exc.seconds, extra={'job_id': job_id, 'message_id':job_key,'stage':'web-ingest'})
             await asyncio.to_thread(self.db.mark_failed,job_id,f'FloodWaitError: retry after {exc.seconds}s')
+            await asyncio.sleep(exc.seconds + 1)
         except Exception as exc:
-            LOG.exception('Channel link ingest failed',extra={'message_id':job_key,'stage':'web-ingest'})
-            job_id=await asyncio.to_thread(self.db.create_job,job_key,0,0,[],'channel-link',url)
+            LOG.exception('Channel link ingest failed',extra={'job_id': job_id, 'message_id':job_key,'stage':'web-ingest'})
             await asyncio.to_thread(self.db.mark_failed,job_id,f'{type(exc).__name__}: {exc}')
 
     async def ingest_worker(self):
         """Serialize channel-link downloads to avoid Telegram flood / retry storms."""
         while True:
-            url = await self.ingest_queue.get()
+            item = await self.ingest_queue.get()
+            # Backward-compatible if a bare URL string ever appears.
+            if isinstance(item, str):
+                item = {'url': item, 'job_id': None, 'job_key': None}
             try:
                 if self._stop_requested.is_set():
-                    job_key = self.web_job_id(url)
-                    job_id = await asyncio.to_thread(self.db.create_job, job_key, 0, 0, [], 'channel-link', url)
-                    await asyncio.to_thread(self.db.mark_failed, job_id, 'Stopped by operator')
-                else:
-                    await self.ingest_channel_link(url)
-                    # Small pacing gap between channel fetches.
+                    if item.get('job_id') is not None:
+                        await asyncio.to_thread(self.db.mark_failed, item['job_id'], 'Stopped by operator')
+                    continue
+                work = asyncio.create_task(
+                    self.ingest_channel_link(item['url'], item.get('job_id'), item.get('job_key')),
+                    name=f"ingest-{item.get('job_id')}",
+                )
+                self._ingest_work_task = work
+                try:
+                    await work
+                except asyncio.CancelledError:
+                    LOG.info('Ingest cancelled by stop', extra={'job_id': item.get('job_id'), 'stage': 'web-ingest'})
+                finally:
+                    if self._ingest_work_task is work:
+                        self._ingest_work_task = None
+                # Small pacing gap between channel fetches.
+                if not self._stop_requested.is_set():
                     await asyncio.sleep(1.25)
             finally:
                 self.ingest_queue.task_done()
@@ -376,13 +430,54 @@ class Pipeline:
             task.add_done_callback(self._active_tasks.discard)
 
     async def request_stop_all(self) -> int:
+        """Cancel active downloads/extractions and mark pending/running jobs failed.
+
+        Also drains the ingest queue so a re-submit is not stuck behind a cancelled download.
+        """
+        self._stop_generation += 1
         self._stop_requested.set()
         count = await asyncio.to_thread(self.db.stop_all_jobs)
+
+        # Abort the in-flight Telegram download/fetch (this was previously left running).
+        work = self._ingest_work_task
+        if work is not None and not work.done():
+            work.cancel()
+            try:
+                await work
+            except (asyncio.CancelledError, Exception):
+                pass
+
         for task in list(self._active_tasks):
             task.cancel()
-        # Allow new work after the stop request has been applied.
+
+        # Drop anything still waiting to ingest so Stop → re-queue starts fresh.
+        drained = 0
+        while True:
+            try:
+                item = self.ingest_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            drained += 1
+            try:
+                if isinstance(item, dict) and item.get('job_id') is not None:
+                    await asyncio.to_thread(self.db.mark_failed, item['job_id'], 'Stopped by operator')
+            finally:
+                self.ingest_queue.task_done()
+
+        # Drop extraction queue items; DB rows are already marked failed.
+        while True:
+            try:
+                self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                self.queue.task_done()
+
         self._stop_requested.clear()
-        LOG.info('Stop-all requested', extra={'stage': 'control', 'stopped': count})
+        LOG.info(
+            'Stop-all requested',
+            extra={'stage': 'control', 'stopped': count, 'drained_ingest': drained},
+        )
         return count
 
     async def run(self):

@@ -127,10 +127,26 @@ class DatabaseManager:
         with self.connect() as db:
             db.execute("""INSERT INTO jobs(message_id,chat_id,user_id,input_files_json,status,source,source_link)
                 VALUES(?,?,?,?,'pending',?,?) ON CONFLICT(chat_id, message_id) DO UPDATE SET
-                input_files_json=excluded.input_files_json,status=CASE WHEN jobs.status='completed' THEN jobs.status ELSE 'pending' END,
+                input_files_json=excluded.input_files_json,
+                status=CASE
+                    WHEN jobs.status IN ('completed','failed') THEN jobs.status
+                    ELSE 'pending'
+                END,
+                error=CASE WHEN jobs.status IN ('completed','failed') THEN jobs.error ELSE NULL END,
                 source=excluded.source,source_link=excluded.source_link,updated_at=CURRENT_TIMESTAMP""",
                 (message_id,chat_id,user_id,json.dumps(files),source,source_link))
             return int(db.execute("SELECT id FROM jobs WHERE chat_id=? AND message_id=?",(chat_id,message_id)).fetchone()['id'])
+
+    def set_job_files_if_active(self, job_id: int, files: list[str]) -> bool:
+        """Attach downloaded files only when the job is still pending/running."""
+        with self.connect() as db:
+            cursor = db.execute(
+                """UPDATE jobs SET input_files_json=?, status='pending', error=NULL,
+                    updated_at=CURRENT_TIMESTAMP
+                    WHERE id=? AND status IN ('pending','running')""",
+                (json.dumps(files), job_id),
+            )
+            return cursor.rowcount > 0
 
     def get_job(self,job_id):
         with self.connect() as db:

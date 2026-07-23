@@ -260,6 +260,7 @@ class Dashboard:
                 return RedirectResponse(f'/?error={quote_plus("No valid URLs to submit")}', 303)
 
             # Queue sequentially via ingest worker to avoid Telegram flood failures.
+            # Each URL creates a pending job immediately so it appears in Recent jobs.
             for submit_url in urls_to_submit:
                 await self.pipeline.enqueue_channel_link(submit_url)
 
