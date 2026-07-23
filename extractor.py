@@ -15,6 +15,7 @@ OTHER_ZIP = re.compile(r"(?i).*\.zip\.(?!001$)\d{3}$")
 ZIP_PART = re.compile(r"(?i).*\.z\d{2}$")
 RAR_PART = re.compile(r"(?i).*\.part(\d+)\.rar$")
 RAR_OLD_PART = re.compile(r"(?i).*\.r\d{2}$")
+IS_RAR = re.compile(r"(?i).*(?:\.rar|\.part\d+\.rar|\.r\d{2})$")
 
 
 class ExtractionError(RuntimeError):
@@ -23,6 +24,10 @@ class ExtractionError(RuntimeError):
 
 def is_archive(path: Path) -> bool:
     return bool(SUPPORTED.fullmatch(path.name))
+
+
+def is_rar(path: Path) -> bool:
+    return bool(IS_RAR.fullmatch(path.name))
 
 
 def is_non_primary(path: Path) -> bool:
@@ -49,6 +54,7 @@ class ArchiveProcessor:
         self.s = settings
         self.password_provider = password_provider or (lambda: [])
         self.exe = str(Path(self._locate_7z()).resolve())
+        self.unrar = self._locate_unrar()
 
     @staticmethod
     def _locate_7z() -> str:
@@ -77,6 +83,28 @@ class ArchiveProcessor:
             "add it to PATH, or set SEVENZIP_PATH to the binary."
         )
 
+    @staticmethod
+    def _locate_unrar() -> str | None:
+        """Prefer RARLAB unrar for modern RAR5 archives that p7zip cannot decode."""
+        override = os.environ.get("UNRAR_PATH", "").strip()
+        if override:
+            if Path(override).is_file():
+                return str(Path(override).resolve())
+            raise RuntimeError(f"UNRAR_PATH does not point to a file: {override!r}")
+        for name in ("unrar", "UnRAR", "unrar.exe"):
+            found = shutil.which(name)
+            if found:
+                return str(Path(found).resolve())
+        if os.name == "nt":
+            candidates = [
+                Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "WinRAR" / "UnRAR.exe",
+                Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "WinRAR" / "UnRAR.exe",
+            ]
+            for candidate in candidates:
+                if candidate.is_file():
+                    return str(candidate.resolve())
+        return None
+
     def _child_env(self) -> dict[str, str]:
         """Minimal, platform-correct environment for the 7-Zip subprocess."""
         if os.name == "nt":
@@ -90,6 +118,18 @@ class ArchiveProcessor:
     def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [self.exe, *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True,
+            encoding="oem" if os.name == "nt" else "utf-8",
+            errors="replace",
+            timeout=self.s.extraction_timeout_seconds, check=False, shell=False,
+            env=self._child_env(),
+        )
+
+    def _run_unrar(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        if not self.unrar:
+            raise ExtractionError("unrar is not installed")
+        return subprocess.run(
+            [self.unrar, *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True,
             encoding="oem" if os.name == "nt" else "utf-8",
             errors="replace",
@@ -119,6 +159,11 @@ class ArchiveProcessor:
         return "-p" if password is None else f"-p{password}"
 
     @staticmethod
+    def _unrar_password_arg(password: str | None) -> str:
+        # -p- = empty password, never prompt interactively
+        return "-p-" if password is None else f"-p{password}"
+
+    @staticmethod
     def _summarize_7z_output(output: str, limit: int = 240) -> str:
         text = " ".join(line.strip() for line in (output or "").splitlines() if line.strip())
         if not text:
@@ -132,6 +177,20 @@ class ArchiveProcessor:
             return "unsupported compression method"
         if "is not archive" in lowered or "can not open the file as archive" in lowered:
             return "not a valid archive"
+        return text[:limit]
+
+    @staticmethod
+    def _summarize_unrar_output(output: str, limit: int = 240) -> str:
+        text = " ".join(line.strip() for line in (output or "").splitlines() if line.strip())
+        if not text:
+            return "no unrar output"
+        lowered = text.lower()
+        if "incorrect password" in lowered or "wrong password" in lowered:
+            return "wrong password"
+        if "encrypted" in lowered and "password" in lowered:
+            return "password required or incorrect"
+        if "unsupported" in lowered:
+            return "unsupported compression method"
         return text[:limit]
 
     def _inspect(self, archive: Path, password: str | None) -> tuple[int, int]:
@@ -182,14 +241,45 @@ class ArchiveProcessor:
                 raise ExtractionError("Actual expanded-size limit exceeded")
         return count, total
 
-    def _extract(self, archive: Path, destination: Path, passwords: list[str | None]) -> None:
-        """Extract archive with per-file password testing.
+    def _extract_with_unrar(self, archive: Path, destination: Path, passwords: list[str | None]) -> None:
+        if not self.unrar:
+            raise ExtractionError(
+                "unrar is not installed (needed for modern RAR archives). "
+                "Install the RARLAB unrar package or set UNRAR_PATH."
+            )
+        destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+        last_error = "archive rejected"
+        # Rough pre-check; exact sizes enforced in _post_validate.
+        self._verify_disk(max(archive.stat().st_size * 4, archive.stat().st_size))
 
-        1. First attempt: no password on each file
-        2. If file needs password: try each password until one works
-        3. If no password works: skip file (mark as failed)
-        4. Continue with next file
-        """
+        candidates = passwords if passwords else [None]
+        for password in candidates:
+            destination_temp = destination.parent / f"{destination.name}_unrar_{abs(hash(password or '')) & 0xFFFFFFFF:x}"
+            try:
+                shutil.rmtree(destination_temp, ignore_errors=True)
+                destination_temp.mkdir(parents=True, exist_ok=True, mode=0o700)
+                # x = extract with paths, -y assume yes, -o+ overwrite, -idc quieter
+                result = self._run_unrar([
+                    "x", "-y", "-o+", "-idc",
+                    self._unrar_password_arg(password),
+                    "--", str(archive), f"{destination_temp}{os.sep}",
+                ])
+                if result.returncode in (0, 1):
+                    self._post_validate(destination_temp)
+                    shutil.rmtree(destination, ignore_errors=True)
+                    destination_temp.rename(destination)
+                    return
+                last_error = self._summarize_unrar_output(result.stdout) or f"unrar exit {result.returncode}"
+                if result.returncode == 11:
+                    last_error = "wrong password"
+            except (ExtractionError, subprocess.TimeoutExpired) as exc:
+                last_error = str(exc) or type(exc).__name__
+            finally:
+                shutil.rmtree(destination_temp, ignore_errors=True)
+
+        raise ExtractionError(f"Could not safely extract {archive.name} with unrar: {last_error}")
+
+    def _extract_with_7z(self, archive: Path, destination: Path, passwords: list[str | None]) -> None:
         destination.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         # First pass: try NO password on all files
@@ -247,6 +337,42 @@ class ArchiveProcessor:
         # All passwords failed
         shutil.rmtree(destination, ignore_errors=True)
         raise ExtractionError(f"Could not safely extract {archive.name}: {last_error}")
+
+    def _extract(self, archive: Path, destination: Path, passwords: list[str | None]) -> None:
+        """Extract archive with password testing.
+
+        RAR files prefer RARLAB unrar (supports RAR5). Other formats use 7-Zip.
+        If 7-Zip hits "unsupported compression method" on a RAR, fall back to unrar.
+        """
+        if is_rar(archive) and self.unrar:
+            try:
+                self._extract_with_unrar(archive, destination, passwords)
+                return
+            except ExtractionError as rar_exc:
+                # Fall through to 7z only when unrar itself is missing codecs (rare).
+                last_rar = str(rar_exc)
+                try:
+                    self._extract_with_7z(archive, destination, passwords)
+                    return
+                except ExtractionError as seven_exc:
+                    raise ExtractionError(
+                        f"Could not safely extract {archive.name}: unrar failed ({last_rar}); "
+                        f"7z failed ({seven_exc})"
+                    ) from seven_exc
+
+        try:
+            self._extract_with_7z(archive, destination, passwords)
+        except ExtractionError as seven_exc:
+            message = str(seven_exc).lower()
+            if is_rar(archive) and "unsupported compression method" in message:
+                if not self.unrar:
+                    raise ExtractionError(
+                        f"Could not safely extract {archive.name}: unsupported compression method. "
+                        "Install RARLAB unrar (or set UNRAR_PATH) — p7zip cannot decode this RAR."
+                    ) from seven_exc
+                self._extract_with_unrar(archive, destination, passwords)
+                return
+            raise
 
     def process(self, message_id: int, files: list[Path]) -> Path:
         if not files:

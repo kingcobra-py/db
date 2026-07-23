@@ -1,6 +1,10 @@
 FROM python:3.11-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 DATA_ROOT=/data
-RUN apt-get update && apt-get install --no-install-recommends -y p7zip-full unar ca-certificates tini && rm -rf /var/lib/apt/lists/*
+# Enable non-free so we can install RARLAB unrar (needed for modern RAR5 archives).
+RUN sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources \
+ && apt-get update \
+ && apt-get install --no-install-recommends -y p7zip-full unrar unar ca-certificates tini \
+ && rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 10001 scanner && useradd --uid 10001 --gid scanner --create-home --shell /usr/sbin/nologin scanner
 WORKDIR /app
 COPY requirements.txt .

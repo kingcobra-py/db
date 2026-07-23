@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from database_manager import DatabaseManager
-from extractor import validate_member, ExtractionError
+from extractor import validate_member, ExtractionError, is_rar
 from parse_credentials import scan_tree, write_results
 
 
@@ -13,6 +13,11 @@ class SecurityTests(unittest.TestCase):
         for value in ("../secret.txt", "/etc/passwd", "C:\\Windows\\file.txt"):
             with self.assertRaises(ExtractionError):
                 validate_member(value)
+
+    def test_is_rar_detects_rar_names(self):
+        self.assertTrue(is_rar(Path("logs.rar")))
+        self.assertTrue(is_rar(Path("@Channel Logs.part1.rar")))
+        self.assertFalse(is_rar(Path("logs.zip")))
 
     def test_scanner_redacts_secret(self):
         with tempfile.TemporaryDirectory() as tmp:
