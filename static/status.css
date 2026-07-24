@@ -1,0 +1,46 @@
+.status.running i {
+  animation: status-pulse 1.25s ease-in-out infinite;
+}
+
+.error-text {
+  display: block;
+  max-width: 100%;
+  margin-top: 7px;
+  padding: 7px 9px;
+  border: 1px solid rgba(198, 68, 62, .25);
+  border-radius: 7px;
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.error-text strong {
+  font-weight: 800;
+}
+
+.dl-progress.is-indeterminate .dl-bar > i {
+  width: 38% !important;
+  animation: progress-indeterminate 1.15s ease-in-out infinite;
+}
+
+@keyframes status-pulse {
+  0%, 100% { opacity: .45; box-shadow: 0 0 0 0 rgba(94, 159, 232, .35); }
+  50% { opacity: 1; box-shadow: 0 0 0 4px rgba(94, 159, 232, 0); }
+}
+
+@keyframes progress-indeterminate {
+  0% { left: -38%; }
+  100% { left: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status.running i,
+  .dl-progress.is-indeterminate .dl-bar > i {
+    animation: none;
+  }
+}

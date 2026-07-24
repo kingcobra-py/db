@@ -114,6 +114,18 @@ class SecurityTests(unittest.TestCase):
             db.create_job(7, 0, 0, ["a.zip"], "channel-link", "https://t.me/x/1")
             self.assertEqual(db.get_job(job_id).status, "failed")
 
+    def test_download_status_transitions_pending_running_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            job_id = db.create_job(8, 0, 0, [], "channel-link", "https://t.me/x/8")
+            self.assertEqual(db.get_job(job_id).status, "pending")
+            self.assertTrue(db.mark_fetching_if_pending(job_id))
+            self.assertEqual(db.get_job(job_id).status, "running")
+            self.assertEqual(db.progress_for_job(job_id)["stage"], "fetching")
+            self.assertTrue(db.set_job_files_if_active(job_id, ["/tmp/a.rar"]))
+            self.assertEqual(db.get_job(job_id).status, "pending")
+
     def test_restore_splits_download_and_extract(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
