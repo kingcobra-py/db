@@ -108,13 +108,23 @@
                 <thead><tr><th>Job</th><th>Source</th><th>Status</th><th>Created</th><th>Output</th></tr></thead>
                 <tbody>
                 {% for job in jobs %}
+                  {% set display_status = 'running' if job.status == 'running' or job.progress_stage in ['fetching', 'downloading'] else job.status %}
                   <tr data-job-id="{{ job.id }}" data-job-status="{{ job.status }}">
                     <td><b>#{{ job.id }}</b><small>Message {{ job.message_id }}</small></td>
                     <td>{{ job.source }}</td>
                     <td>
-                      <span class="status {{ job.status }}">{{ job.status }}</span>
+                      <span class="status {{ display_status }}">{{ 'Successful' if display_status == 'completed' else display_status|capitalize }}</span>
                       {% if job.error %}<small class="error-text" title="{{ job.error }}">{{ job.error }}</small>{% endif %}
-                      <div class="dl-progress" data-progress hidden><div class="dl-bar"><i></i></div><small class="dl-label"></small></div>
+                      <div class="dl-progress {% if display_status in ['pending', 'running'] %}is-indeterminate{% endif %}" data-progress {% if display_status not in ['pending', 'running'] %}hidden{% endif %}>
+                        <div class="dl-bar"><i></i></div>
+                        <small class="dl-label">
+                          {% if display_status == 'running' and job.progress_stage == 'fetching' %}Running — fetching Telegram message…
+                          {% elif display_status == 'running' and job.progress_stage == 'downloading' %}Running — downloading media…
+                          {% elif display_status == 'running' %}Running — extracting and scanning…
+                          {% elif job.progress_stage == 'queued' %}Pending — waiting for download worker
+                          {% else %}Pending — waiting for worker{% endif %}
+                        </small>
+                      </div>
                     </td>
                     <td>{{ job.created_at }}</td>
                     <td>
