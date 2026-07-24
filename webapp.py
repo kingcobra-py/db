@@ -198,13 +198,42 @@ class Dashboard:
             if not self._authorized(request): return RedirectResponse('/login',303)
             if self.pipeline is not None:
                 self.pipeline.kick_ingest()
-            # Show enough rows that Running/Failed jobs are not hidden behind a large range submit.
-            stats=await asyncio.to_thread(self.db.stats); jobs=await asyncio.to_thread(self.db.recent,500)
-            passwords=await asyncio.to_thread(self.passwords.list_masked)
-            storage_bytes=await asyncio.to_thread(self.db.get_total_compressed_size)
-            extraction_workers=await asyncio.to_thread(self.db.get_extraction_workers,self.s.extraction_workers)
-            ingest=await asyncio.to_thread(self.db.ingest_status)
-            return self.templates.TemplateResponse(request=request,name='dashboard.html',context={'stats':stats,'jobs':jobs,'passwords':passwords,'csrf':self._csrf(request),'notice':notice,'error':error,'storage_bytes':storage_bytes,'storage_human':_human(storage_bytes),'extraction_workers':extraction_workers,'ingest':ingest})
+            # Parallel DB reads keep first paint fast; storage size is loaded async by the browser.
+            stats, jobs, passwords, extraction_workers, ingest = await asyncio.gather(
+                asyncio.to_thread(self.db.stats),
+                asyncio.to_thread(self.db.recent, 500),
+                asyncio.to_thread(self.passwords.list_masked),
+                asyncio.to_thread(self.db.get_extraction_workers, self.s.extraction_workers),
+                asyncio.to_thread(self.db.ingest_status),
+            )
+            return self.templates.TemplateResponse(
+                request=request,
+                name='dashboard.html',
+                context={
+                    'stats': stats,
+                    'jobs': jobs,
+                    'passwords': passwords,
+                    'csrf': self._csrf(request),
+                    'notice': notice,
+                    'error': error,
+                    'storage_bytes': 0,
+                    'storage_human': '…',
+                    'extraction_workers': extraction_workers,
+                    'ingest': ingest,
+                },
+            )
+
+        @self.app.get('/dashboard/pulse')
+        async def dashboard_pulse(request: Request):
+            """Lightweight live snapshot used instead of hundreds of per-job polls."""
+            self._require(request)
+            if self.pipeline is not None:
+                self.pipeline.kick_ingest()
+            stats, live = await asyncio.gather(
+                asyncio.to_thread(self.db.stats),
+                asyncio.to_thread(self.db.live_jobs, 40),
+            )
+            return {'stats': stats, 'jobs': live}
 
         @self.app.get('/storage-info')
         async def storage_info(request: Request):

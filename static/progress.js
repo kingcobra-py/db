@@ -3,8 +3,8 @@
 (function () {
   "use strict";
 
-  var POLL_MS = 1500;
-  var ACTIVE = { pending: true, running: true };
+  var POLL_MS = 2000;
+  var lastStats = null;
 
   function human(bytes) {
     var n = Number(bytes) || 0;
@@ -17,9 +17,15 @@
     return n.toFixed(1) + " " + units[index];
   }
 
-  function activeRows() {
-    return Array.prototype.filter.call(document.querySelectorAll("tr[data-job-id]"), function (row) {
-      return Boolean(ACTIVE[row.getAttribute("data-job-status")]);
+  function rowById(id) {
+    return document.querySelector('tr[data-job-id="' + id + '"]');
+  }
+
+  function updateStatCards(stats) {
+    if (!stats) return;
+    ["pending", "running", "completed", "failed"].forEach(function (key) {
+      var card = document.querySelector('.stat[data-job-filter="' + key + '"] strong');
+      if (card && stats[key] != null) card.textContent = String(stats[key]);
     });
   }
 
@@ -37,6 +43,7 @@
             : "pending";
     badge.className = "status " + state;
     badge.textContent = state === "completed" ? "Successful" : state.charAt(0).toUpperCase() + state.slice(1);
+    row.setAttribute("data-job-status", data.status || row.getAttribute("data-job-status") || "");
   }
 
   function renderProgress(row, data) {
@@ -51,7 +58,10 @@
       stage === "downloading" ||
       stage === "queued" ||
       stage === "fetching";
-    if (!active) return;
+    if (!active) {
+      box.hidden = true;
+      return;
+    }
 
     box.hidden = false;
     box.classList.remove("is-complete", "is-failed");
@@ -86,9 +96,18 @@
     label.textContent = "Pending — waiting for extraction worker";
   }
 
-  function pollRow(row) {
-    var id = row.getAttribute("data-job-id");
-    return fetch("/jobs/" + encodeURIComponent(id) + "/progress", {
+  function statsChanged(next) {
+    if (!lastStats || !next) return false;
+    return (
+      lastStats.pending !== next.pending ||
+      lastStats.running !== next.running ||
+      lastStats.completed !== next.completed ||
+      lastStats.failed !== next.failed
+    );
+  }
+
+  function pulse() {
+    return fetch("/dashboard/pulse", {
       credentials: "same-origin",
       headers: { Accept: "application/json" }
     })
@@ -97,51 +116,67 @@
         return response.json();
       })
       .then(function (data) {
-        renderProgress(row, data);
-        var originalStatus = row.getAttribute("data-job-status");
-        return data.status && data.status !== originalStatus ? "changed" : "ok";
+        updateStatCards(data.stats);
+        var terminalChange = false;
+        (data.jobs || []).forEach(function (job) {
+          var row = rowById(job.id);
+          if (!row) {
+            // A newly active job is not in the current DOM slice — refresh once.
+            terminalChange = true;
+            return;
+          }
+          var previous = row.getAttribute("data-job-status");
+          renderProgress(row, job);
+          if (job.status && previous && job.status !== previous && (job.status === "completed" || job.status === "failed")) {
+            terminalChange = true;
+          }
+        });
+        if (lastStats && statsChanged(data.stats) && (data.stats.completed > lastStats.completed || data.stats.failed > lastStats.failed)) {
+          terminalChange = true;
+        }
+        lastStats = data.stats || lastStats;
+        if (terminalChange) {
+          window.location.reload();
+          return;
+        }
+        window.setTimeout(pulse, POLL_MS);
       })
       .catch(function () {
-        return "ok";
+        window.setTimeout(pulse, POLL_MS * 2);
       });
   }
 
-  function pollJobs() {
-    var rows = activeRows();
-    if (!rows.length) return;
-    Promise.all(rows.map(pollRow)).then(function (results) {
-      if (results.indexOf("changed") !== -1) {
-        window.location.reload();
-        return;
-      }
-      window.setTimeout(pollJobs, POLL_MS);
-    });
-  }
-
-  function loadScanMetrics() {
-    document.querySelectorAll('tr[data-job-status="completed"]').forEach(function (row) {
-      var jobId = row.getAttribute("data-job-id");
-      fetch("/jobs/" + encodeURIComponent(jobId) + "/scan-metrics", {
-        credentials: "same-origin",
-        headers: { Accept: "application/json" }
+  function loadStorage() {
+    var target = document.querySelector("[data-storage-value]");
+    if (!target) return;
+    fetch("/storage-info", {
+      credentials: "same-origin",
+      headers: { Accept: "application/json" }
+    })
+      .then(function (response) {
+        return response.ok ? response.json() : null;
       })
-        .then(function (response) {
-          return response.ok ? response.json() : null;
-        })
-        .then(function (data) {
-          if (!data) return;
-          var files = document.getElementById("files-" + jobId);
-          var findings = document.getElementById("findings-" + jobId);
-          if (files) files.textContent = String(data.files_scanned != null ? data.files_scanned : "—");
-          if (findings) findings.textContent = String(data.findings != null ? data.findings : "—");
-        })
-        .catch(function () {});
-    });
+      .then(function (data) {
+        if (!data) return;
+        target.innerHTML =
+          String(data.total_human_readable || human(data.total_bytes || 0)) + " <small>used</small>";
+      })
+      .catch(function () {});
   }
 
   function startJobPolling() {
-    pollJobs();
-    loadScanMetrics();
+    var pending = document.querySelector('.stat[data-job-filter="pending"] strong');
+    var running = document.querySelector('.stat[data-job-filter="running"] strong');
+    var completed = document.querySelector('.stat[data-job-filter="completed"] strong');
+    var failed = document.querySelector('.stat[data-job-filter="failed"] strong');
+    lastStats = {
+      pending: pending ? Number(pending.textContent || 0) : 0,
+      running: running ? Number(running.textContent || 0) : 0,
+      completed: completed ? Number(completed.textContent || 0) : 0,
+      failed: failed ? Number(failed.textContent || 0) : 0
+    };
+    loadStorage();
+    pulse();
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", startJobPolling);

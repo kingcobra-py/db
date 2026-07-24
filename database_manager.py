@@ -375,17 +375,64 @@ class DatabaseManager:
         with self.connect() as db:
             if status in {'pending', 'running', 'completed', 'failed'}:
                 rows = db.execute(
-                    "SELECT id,message_id,status,progress_stage,source,source_link,output_text,summary_json,error,created_at,updated_at "
+                    "SELECT id,message_id,status,progress_stage,source,source_link,output_text,summary_json,summary_data,error,created_at,updated_at "
                     "FROM jobs WHERE status=? ORDER BY id DESC LIMIT ?",
                     (status, limit),
                 ).fetchall()
             else:
                 rows = db.execute(
-                    "SELECT id,message_id,status,progress_stage,source,source_link,output_text,summary_json,error,created_at,updated_at "
+                    "SELECT id,message_id,status,progress_stage,source,source_link,output_text,summary_json,summary_data,error,created_at,updated_at "
                     "FROM jobs ORDER BY id DESC LIMIT ?",
                     (limit,),
                 ).fetchall()
-            return [dict(r) for r in rows]
+            out = []
+            for r in rows:
+                item = dict(r)
+                metrics = None
+                raw = item.pop("summary_data", None)
+                if raw:
+                    try:
+                        data = json.loads(raw)
+                        if isinstance(data, dict):
+                            metrics = {
+                                "files_scanned": data.get("files_scanned"),
+                                "findings": data.get("findings"),
+                            }
+                    except (TypeError, ValueError):
+                        metrics = None
+                item["metrics"] = metrics
+                out.append(item)
+            return out
+
+    def live_jobs(self, limit: int = 40) -> list[dict[str, Any]]:
+        """Compact progress snapshot for active dashboard rows only."""
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT id, status, progress_stage, progress_done, progress_total,
+                          progress_file, progress_index, progress_count
+                   FROM jobs
+                   WHERE status='running'
+                      OR (status='pending' AND progress_stage IN ('fetching','downloading','queued'))
+                   ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, id DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        out = []
+        for r in rows:
+            done = int(r["progress_done"] or 0)
+            total = int(r["progress_total"] or 0)
+            out.append({
+                "id": int(r["id"]),
+                "status": r["status"],
+                "stage": r["progress_stage"],
+                "done": done,
+                "total": total,
+                "percent": int(done * 100 / total) if total else 0,
+                "file": r["progress_file"],
+                "index": int(r["progress_index"] or 0),
+                "count": int(r["progress_count"] or 0),
+            })
+        return out
 
     def find_job_id_by_input_basename(self, basename: str, exclude_job_id: int | None = None) -> int | None:
         """Return another job that already owns an input file with this basename."""

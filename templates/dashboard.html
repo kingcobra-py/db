@@ -147,7 +147,7 @@
                     <td>
                       {% if job.status == 'completed' %}
                         <div class="job-output">
-                          <small class="metrics">Files: <strong id="files-{{ job.id }}">—</strong> · Findings: <strong id="findings-{{ job.id }}">—</strong></small>
+                          <small class="metrics">Files: <strong id="files-{{ job.id }}">{% if job.metrics and job.metrics.files_scanned is not none %}{{ job.metrics.files_scanned }}{% else %}—{% endif %}</strong> · Findings: <strong id="findings-{{ job.id }}">{% if job.metrics and job.metrics.findings is not none %}{{ job.metrics.findings }}{% else %}—{% endif %}</strong></small>
                           <div><a href="/jobs/{{ job.id }}/report">Report</a><a href="/jobs/{{ job.id }}/summary">JSON</a></div>
                         </div>
                       {% else %}<span class="muted">—</span>{% endif %}
@@ -176,7 +176,7 @@
           <section class="panel storage-panel" aria-label="Storage usage">
             <div class="panel-head"><div><p class="kicker">Storage</p><h2>Downloaded archives</h2></div><span class="head-icon" aria-hidden="true">▣</span></div>
             <div class="panel-body">
-              <div class="storage-value">{{ storage_human }} <small>used</small></div>
+              <div class="storage-value" data-storage-value>{{ storage_human }} <small>used</small></div>
               <p class="muted">Compressed archives tracked across all jobs.</p>
               <div class="storage-bar" aria-hidden="true"><span></span></div>
               <form method="post" action="/cleanup-files" data-confirm="Remove ALL downloaded and extracted files? This cannot be undone.">

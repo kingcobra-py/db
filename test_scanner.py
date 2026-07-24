@@ -221,9 +221,36 @@ class SecurityTests(unittest.TestCase):
                     db.mark_failed(job_id, "boom")
             recent = db.recent(3)
             self.assertEqual(len(recent), 3)
+            self.assertIn("metrics", recent[0])
             failed = db.recent(10, status="failed")
             self.assertTrue(failed)
             self.assertTrue(all(row["status"] == "failed" for row in failed))
+
+    def test_recent_embeds_completed_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            job_id = db.create_job(9, 0, 0, ["a.rar"])
+            db.mark_completed(job_id, "/tmp/r.txt", "/tmp/s.json", {"files_scanned": 12, "findings": 3})
+            row = db.recent(1)[0]
+            self.assertEqual(row["metrics"]["files_scanned"], 12)
+            self.assertEqual(row["metrics"]["findings"], 3)
+
+    def test_live_jobs_returns_active_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            pending = db.create_job(1, 0, 0, [], "channel-link", "https://t.me/x/1")
+            db.update_progress(pending, "queued", 0, 0, "waiting", 0, 0)
+            running = db.create_job(2, 0, 0, [], "channel-link", "https://t.me/x/2")
+            db.mark_fetching_if_pending(running)
+            done = db.create_job(3, 0, 0, ["a.rar"])
+            db.mark_completed(done, "r", "s", {"files_scanned": 1, "findings": 0})
+            live = db.live_jobs()
+            ids = {item["id"] for item in live}
+            self.assertIn(pending, ids)
+            self.assertIn(running, ids)
+            self.assertNotIn(done, ids)
 
     def test_unlimited_archive_file_count(self):
         with tempfile.TemporaryDirectory() as tmp:
