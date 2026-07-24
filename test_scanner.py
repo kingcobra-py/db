@@ -150,6 +150,55 @@ class SecurityTests(unittest.TestCase):
             self.assertTrue(db.set_job_files_if_active(job_id, ["/tmp/a.rar"]))
             self.assertEqual(db.get_job(job_id).status, "pending")
 
+    def test_find_job_by_input_basename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            first = db.create_job(1, 0, 0, ["/data/inbox/1/LOGS_CENTER.rar"])
+            second = db.create_job(2, 0, 0, ["/data/inbox/2/other.zip"])
+            self.assertEqual(db.find_job_id_by_input_basename("logs_center.rar"), first)
+            self.assertEqual(db.find_job_id_by_input_basename("LOGS_CENTER.rar", exclude_job_id=first), None)
+            self.assertEqual(db.find_job_id_by_input_basename("missing.rar"), None)
+            self.assertEqual(db.find_job_id_by_input_basename("other.zip"), second)
+
+    def test_delete_all_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            a = db.create_job(1, 0, 0, ["a.rar"])
+            b = db.create_job(2, 0, 0, ["b.rar"])
+            db.save_credentials(a, [{"access_key": "AKIATEST", "secret_key": "x" * 40, "region": "us-east-1"}])
+            self.assertEqual(db.delete_all_jobs(), 2)
+            self.assertEqual(db.stats(), {"pending": 0, "running": 0, "completed": 0, "failed": 0})
+            self.assertEqual(db.get_all_credentials(), [])
+            self.assertIsNone(db.get_job(a))
+            self.assertIsNone(db.get_job(b))
+
+    def test_recent_limit_and_status_filter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            for i in range(5):
+                job_id = db.create_job(i + 1, 0, 0, [f"{i}.rar"])
+                if i % 2 == 0:
+                    db.mark_failed(job_id, "boom")
+            recent = db.recent(3)
+            self.assertEqual(len(recent), 3)
+            failed = db.recent(10, status="failed")
+            self.assertTrue(failed)
+            self.assertTrue(all(row["status"] == "failed" for row in failed))
+
+    def test_unlimited_archive_file_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "many.zip"
+            with zipfile.ZipFile(archive, "w") as zipped:
+                for i in range(5):
+                    zipped.writestr(f"file-{i}.txt", "data")
+            processor = object.__new__(ArchiveProcessor)
+            processor.s = SimpleNamespace(max_archive_files=0)
+            count, _expanded = processor._inspect_zip_native(archive)
+            self.assertEqual(count, 5)
+
     def test_restore_splits_download_and_extract(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = DatabaseManager(Path(tmp) / "jobs.sqlite3")

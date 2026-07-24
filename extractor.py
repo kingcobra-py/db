@@ -214,7 +214,7 @@ class ArchiveProcessor:
         for entry in entries:
             validate_member(entry.filename)
             count += 1
-            if count > self.s.max_archive_files:
+            if self.s.max_archive_files > 0 and count > self.s.max_archive_files:
                 raise ExtractionError("Archive file-count limit exceeded")
             if not entry.is_dir():
                 expanded += int(entry.file_size)
@@ -256,7 +256,7 @@ class ArchiveProcessor:
             elif line.startswith("Size = ") and line[7:].strip().isdigit():
                 if not is_directory:
                     expanded += int(line[7:].strip())
-            if count > self.s.max_archive_files:
+            if self.s.max_archive_files > 0 and count > self.s.max_archive_files:
                 raise ExtractionError("Archive file-count limit exceeded")
         if count == 0:
             if archive.name.lower().endswith(".zip"):
@@ -280,7 +280,7 @@ class ArchiveProcessor:
         resolved_root = root.resolve(); count = total = 0
         for path in root.rglob("*"):
             count += 1
-            if count > self.s.max_archive_files:
+            if self.s.max_archive_files > 0 and count > self.s.max_archive_files:
                 raise ExtractionError("Actual file-count limit exceeded")
             stat = path.lstat()
             if path.is_symlink() or (path.is_file() and stat.st_nlink > 1):

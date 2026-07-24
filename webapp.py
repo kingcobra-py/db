@@ -199,7 +199,7 @@ class Dashboard:
             if self.pipeline is not None:
                 self.pipeline.kick_ingest()
             # Show enough rows that Running/Failed jobs are not hidden behind a large range submit.
-            stats=await asyncio.to_thread(self.db.stats); jobs=await asyncio.to_thread(self.db.recent,100)
+            stats=await asyncio.to_thread(self.db.stats); jobs=await asyncio.to_thread(self.db.recent,500)
             passwords=await asyncio.to_thread(self.passwords.list_masked)
             storage_bytes=await asyncio.to_thread(self.db.get_total_compressed_size)
             extraction_workers=await asyncio.to_thread(self.db.get_extraction_workers,self.s.extraction_workers)
@@ -294,6 +294,16 @@ class Dashboard:
             else:
                 count = await asyncio.to_thread(self.db.stop_all_jobs)
             return RedirectResponse(f'/?notice={quote_plus(f"Stopped {count} job(s)")}', 303)
+
+        @self.app.post('/jobs/delete-all')
+        async def delete_all_jobs(request: Request, csrf: str = Form(...)):
+            """Stop active work, then delete every job from Recent jobs."""
+            self._require_post(request, csrf)
+            if hasattr(self.pipeline, 'request_stop_all'):
+                await self.pipeline.request_stop_all()
+            count = await asyncio.to_thread(self.db.delete_all_jobs)
+            LOG.info('Deleted all jobs', extra={'stage': 'control', 'deleted': count})
+            return RedirectResponse(f'/?notice={quote_plus(f"Deleted {count} job(s)")}', 303)
 
         @self.app.get('/jobs/{job_id}/progress')
         async def job_progress(job_id: int,request: Request):

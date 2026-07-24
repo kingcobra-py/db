@@ -65,10 +65,18 @@
       {% if error %}<div class="alert error" role="alert">{{ error }}</div>{% endif %}
 
       <section class="stats" aria-label="Job statistics">
-        <article class="stat pending"><span>Pending</span><strong>{{ stats['pending'] }}</strong><small>jobs</small></article>
-        <article class="stat running"><span>Running</span><strong>{{ stats['running'] }}</strong><small>jobs</small></article>
-        <article class="stat completed"><span>Completed</span><strong>{{ stats['completed'] }}</strong><small>jobs</small></article>
-        <article class="stat failed"><span>Failed</span><strong>{{ stats['failed'] }}</strong><small>jobs</small></article>
+        <button type="button" class="stat pending" data-job-filter="pending" aria-pressed="false">
+          <span>Pending</span><strong>{{ stats['pending'] }}</strong><small>jobs</small>
+        </button>
+        <button type="button" class="stat running" data-job-filter="running" aria-pressed="false">
+          <span>Running</span><strong>{{ stats['running'] }}</strong><small>jobs</small>
+        </button>
+        <button type="button" class="stat completed" data-job-filter="completed" aria-pressed="false">
+          <span>Completed</span><strong>{{ stats['completed'] }}</strong><small>jobs</small>
+        </button>
+        <button type="button" class="stat failed" data-job-filter="failed" aria-pressed="false">
+          <span>Failed</span><strong>{{ stats['failed'] }}</strong><small>jobs</small>
+        </button>
       </section>
 
       <div class="layout">
@@ -94,19 +102,28 @@
 
           <section class="panel jobs-panel" id="jobs">
             <div class="panel-head">
-              <div><p class="kicker">02 / Activity</p><h2>Recent jobs</h2><p class="panel-note">Live download and scan status.</p></div>
+              <div>
+                <p class="kicker">02 / Activity</p>
+                <h2>Recent jobs</h2>
+                <p class="panel-note">Live download and scan status. Up to 500 jobs; scroll this list only.</p>
+                <p class="panel-note filter-hint" data-filter-hint hidden></p>
+              </div>
               <div class="panel-head-actions">
                 <button class="ghost refresh" type="button">Refresh</button>
                 <form method="post" action="/jobs/stop-all" data-confirm="Stop ALL running and pending jobs? This cannot be undone.">
                   <input type="hidden" name="csrf" value="{{ csrf }}">
                   <button class="danger" type="submit">Stop active</button>
                 </form>
+                <form method="post" action="/jobs/delete-all" data-confirm="Delete ALL recent jobs from the dashboard? This cannot be undone.">
+                  <input type="hidden" name="csrf" value="{{ csrf }}">
+                  <button class="danger" type="submit">Delete all</button>
+                </form>
               </div>
             </div>
-            <div class="table-wrap">
+            <div class="table-wrap" data-jobs-scroll>
               <table>
                 <thead><tr><th>Job</th><th>Source</th><th>Status</th><th>Created</th><th>Output</th></tr></thead>
-                <tbody>
+                <tbody data-jobs-body>
                 {% for job in jobs %}
                   {% set display_status = 'running' if job.status == 'running' or job.progress_stage in ['fetching', 'downloading'] else job.status %}
                   <tr data-job-id="{{ job.id }}" data-job-status="{{ job.status }}">
@@ -137,8 +154,9 @@
                     </td>
                   </tr>
                 {% else %}
-                  <tr><td colspan="5" class="empty">No jobs yet. Queue a Telegram source to begin.</td></tr>
+                  <tr data-empty-jobs><td colspan="5" class="empty">No jobs yet. Queue a Telegram source to begin.</td></tr>
                 {% endfor %}
+                  <tr data-filter-empty hidden><td colspan="5" class="empty">No jobs match this filter.</td></tr>
                 </tbody>
               </table>
             </div>

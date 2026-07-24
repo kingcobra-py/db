@@ -80,7 +80,8 @@ def load_settings() -> Settings:
         max_download_bytes=non_negative_int("MAX_DOWNLOAD_BYTES", 0),
         # 0 disables expanded-size cap; free disk remains the hard stop.
         max_expanded_bytes=non_negative_int("MAX_EXPANDED_BYTES", 0),
-        max_archive_files=positive_int("MAX_ARCHIVE_FILES", 50_000),
+        # 0 disables archive file-count cap; free disk remains the hard stop.
+        max_archive_files=non_negative_int("MAX_ARCHIVE_FILES", 0),
         max_scan_file_bytes=positive_int("MAX_SCAN_FILE_BYTES", 100 * 1024**2),
         max_nesting_depth=positive_int("MAX_NESTING_DEPTH", 3),
         min_free_bytes=positive_int("MIN_FREE_BYTES", 1024**3),

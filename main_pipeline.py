@@ -189,7 +189,7 @@ class Pipeline:
                 raise ValueError('Stopped by operator')
         else:
             job_id=await asyncio.to_thread(self.db.create_job,job_key,chat_id,user_id,[],source,source_link)
-        files=[]; total=0
+        files=[]; total=0; skipped_duplicates=0
         stop_gen=self._stop_generation
         try:
             if self._stop_requested.is_set() or stop_gen != self._stop_generation:
@@ -204,6 +204,24 @@ class Pipeline:
                 if not live or live.status not in {'pending','running'}:
                     raise ValueError('Stopped by operator')
                 filename=Path(getattr(message.file,'name',None) or f'upload-{index}.bin').name
+                lowered = filename.strip().lower()
+                if any(Path(path).name.strip().lower() == lowered for path in files):
+                    skipped_duplicates += 1
+                    LOG.info(
+                        'Skipping duplicate Telegram archive %s within the same job',
+                        filename,
+                        extra={'job_id': job_id, 'message_id': job_key, 'stage': 'download'},
+                    )
+                    continue
+                duplicate_of = await asyncio.to_thread(self.db.find_job_id_by_input_basename, filename, job_id)
+                if duplicate_of is not None:
+                    skipped_duplicates += 1
+                    LOG.info(
+                        'Skipping duplicate Telegram archive %s (already on job %s)',
+                        filename, duplicate_of,
+                        extra={'job_id': job_id, 'message_id': job_key, 'stage': 'download'},
+                    )
+                    continue
                 destination=inbox/filename
                 if destination.exists(): destination=inbox/f'{index}-{filename}'
                 # MAX_DOWNLOAD_BYTES is advisory only (0 = ignore). Free disk is the hard stop.
@@ -236,7 +254,22 @@ class Pipeline:
                 if available <= self.s.min_free_bytes:
                     raise ValueError('Insufficient disk space')
                 files.append(str(destination))
-            if not files: raise ValueError('Telegram message has no downloadable media')
+            if not files:
+                if skipped_duplicates:
+                    await asyncio.to_thread(self.db.delete_job, job_id)
+                    shutil.rmtree(inbox, ignore_errors=True)
+                    if notify:
+                        await self.notify(
+                            chat_id,
+                            '♻️ Duplicate archive skipped (same filename already queued).',
+                            messages[0].id if messages else None,
+                        )
+                    LOG.info(
+                        'Duplicate archive job removed (no unique media)',
+                        extra={'job_id': job_id, 'message_id': job_key, 'stage': 'download'},
+                    )
+                    return None
+                raise ValueError('Telegram message has no downloadable media')
             live=await asyncio.to_thread(self.db.get_job,job_id)
             if not live or live.status not in {'pending','running'}:
                 raise ValueError('Stopped by operator')

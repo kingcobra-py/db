@@ -371,10 +371,58 @@ class DatabaseManager:
             counts={r['status']:int(r['n']) for r in db.execute("SELECT status,COUNT(*) n FROM jobs GROUP BY status")}
         return {k:counts.get(k,0) for k in ('pending','running','completed','failed')}
 
-    def recent(self,limit=25):
+    def recent(self,limit=25, status: str | None = None):
         with self.connect() as db:
-            rows=db.execute("SELECT id,message_id,status,progress_stage,source,source_link,output_text,summary_json,error,created_at,updated_at FROM jobs ORDER BY id DESC LIMIT ?",(limit,)).fetchall()
+            if status in {'pending', 'running', 'completed', 'failed'}:
+                rows = db.execute(
+                    "SELECT id,message_id,status,progress_stage,source,source_link,output_text,summary_json,error,created_at,updated_at "
+                    "FROM jobs WHERE status=? ORDER BY id DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT id,message_id,status,progress_stage,source,source_link,output_text,summary_json,error,created_at,updated_at "
+                    "FROM jobs ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
             return [dict(r) for r in rows]
+
+    def find_job_id_by_input_basename(self, basename: str, exclude_job_id: int | None = None) -> int | None:
+        """Return another job that already owns an input file with this basename."""
+        needle = Path(basename).name.strip().lower()
+        if not needle:
+            return None
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id, input_files_json FROM jobs WHERE status IN ('pending','running','completed','failed') "
+                "ORDER BY id ASC"
+            ).fetchall()
+        for row in rows:
+            job_id = int(row["id"])
+            if exclude_job_id is not None and job_id == exclude_job_id:
+                continue
+            try:
+                files = json.loads(row["input_files_json"] or "[]")
+            except (TypeError, ValueError):
+                continue
+            for file_path in files:
+                if Path(str(file_path)).name.strip().lower() == needle:
+                    return job_id
+        return None
+
+    def delete_job(self, job_id: int) -> bool:
+        with self.connect() as db:
+            db.execute("DELETE FROM extracted_credentials WHERE job_id=?", (job_id,))
+            cursor = db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+            return cursor.rowcount > 0
+
+    def delete_all_jobs(self) -> int:
+        """Remove every job row and extracted credentials. Returns jobs deleted."""
+        with self.connect() as db:
+            count = int(db.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()["n"])
+            db.execute("DELETE FROM extracted_credentials")
+            db.execute("DELETE FROM jobs")
+        return count
 
     def output_for_job(self,job_id,kind):
         if kind not in {"report", "summary"}:
