@@ -275,7 +275,7 @@ class DatabaseManager:
                    ORDER BY id ASC"""
             ))
         queued = 0
-        active = None
+        active_jobs: list[dict[str, Any]] = []
         for row in rows:
             try:
                 files = json.loads(row["input_files_json"] or "[]")
@@ -285,10 +285,15 @@ class DatabaseManager:
                 continue
             stage = (row["progress_stage"] or "queued").strip().lower()
             if stage in {"fetching", "downloading"}:
-                active = {"job_id": int(row["id"]), "stage": stage}
+                active_jobs.append({"job_id": int(row["id"]), "stage": stage})
             else:
                 queued += 1
-        return {"queued": queued, "active": active}
+        return {
+            "queued": queued,
+            "active": active_jobs[0] if active_jobs else None,
+            "active_jobs": active_jobs,
+            "active_count": len(active_jobs),
+        }
 
     def pending_channel_downloads(self) -> list[dict[str, Any]]:
         """Return channel-link jobs that still need their Telegram media downloaded."""
@@ -327,6 +332,18 @@ class DatabaseManager:
             db.execute("""UPDATE jobs SET progress_stage=?,progress_done=?,progress_total=?,progress_file=?,
                 progress_index=?,progress_count=?,updated_at=CURRENT_TIMESTAMP WHERE id=?""",
                 (stage,int(done),int(total),filename,int(index),int(count),job_id))
+
+    def mark_fetching_if_pending(self, job_id: int) -> bool:
+        """Atomically move a pending download to fetching before its task starts."""
+        with self.connect() as db:
+            cursor = db.execute(
+                """UPDATE jobs SET progress_stage='fetching', progress_done=0,
+                    progress_total=0, progress_file='resolving message',
+                    progress_index=0, progress_count=0, updated_at=CURRENT_TIMESTAMP
+                    WHERE id=? AND status='pending'""",
+                (job_id,),
+            )
+            return cursor.rowcount == 1
 
     def clear_progress(self,job_id):
         with self.connect() as db:
