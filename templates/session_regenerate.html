@@ -3,38 +3,52 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Session Regenerate</title>
-  <link rel="stylesheet" href="/static/styles.css">
+  <meta name="description" content="Generate a new Telegram session for Archive Scanner">
+  <title>Telegram Session — Archive Scanner</title>
+  <link rel="stylesheet" href="/static/neon.css">
 </head>
-<body>
-<header class="topbar">
-  <a class="brand" href="/"><span class="brand-mark">A</span><span>Archive Scanner</span></a>
-</header>
-<main class="container">
-  <section class="panel">
-    <div class="panel-head"><div><p class="eyebrow">Account</p><h2>Regenerate Session</h2></div>
-    <span class="icon-box">🔐</span></div>
-    <p class="muted">Update Telegram account. Phone + 2FA (if enabled) required.</p>
-    {% if step == 1 %}
-    <form method="post" action="/session-regenerate/send-code" class="stack">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <label>Phone Number</label>
-      <input name="phone_number" type="tel" placeholder="+1234567890" required>
-      <p class="muted">Include country code</p>
-      <button type="submit">Send Code</button>
-    </form>
-    {% elif step == 2 %}
-    <form method="post" action="/session-regenerate/verify-code" class="stack">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <p class="muted">Code sent to <strong>{{ phone }}</strong></p>
-      <label>Code</label>
-      <input name="code" type="text" placeholder="12345" required>
-      <label>2FA (optional)</label>
-      <input name="password" type="password" placeholder="Leave blank if none">
-      <button type="submit">Verify & Update</button>
-    </form>
-    {% endif %}
-  </section>
-</main>
+<body class="neon-body">
+  <main class="session-shell">
+    <header class="topbar session-topbar">
+      <a class="brandline" href="/"><strong>ARCHIVE SCANNER</strong><span>settings / Telegram session</span></a>
+      <div class="live-pill"><i class="live-dot"></i>secure flow</div>
+    </header>
+
+    <article class="panel session-card">
+      <div class="panel-head">
+        <div><div class="kicker">Account settings</div><h2>Generate Telegram session</h2><div class="panel-note">Replace the connected Telegram account session securely.</div></div>
+        <div class="head-icon">◉</div>
+      </div>
+      <div class="panel-body">
+        {% if step == 1 %}
+        <div class="eyebrow">Step 01 / Request verification</div>
+        <form method="post" action="/session-regenerate/send-code" class="session-form">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <label for="phone-number">Phone number</label>
+          <input id="phone-number" name="phone_number" type="tel" autocomplete="tel" placeholder="+1234567890" required>
+          <div class="panel-note">Include the international country code. Telegram will send a login code.</div>
+          <div class="session-actions">
+            <a class="full-btn link-btn" href="/">Back to dashboard</a>
+            <button class="run-btn" type="submit">SEND CODE</button>
+          </div>
+        </form>
+        {% elif step == 2 %}
+        <div class="eyebrow">Step 02 / Verify account</div>
+        <form method="post" action="/session-regenerate/verify-code" class="session-form">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <div class="panel-note">Verification code sent to <strong>{{ phone }}</strong>.</div>
+          <label for="telegram-code">Telegram code</label>
+          <input id="telegram-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="12345" required>
+          <label for="telegram-password">Two-factor password (optional)</label>
+          <input id="telegram-password" name="password" type="password" autocomplete="current-password" placeholder="Leave blank if disabled">
+          <div class="session-actions">
+            <a class="full-btn link-btn" href="/session-regenerate">Start over</a>
+            <button class="run-btn" type="submit">VERIFY &amp; SAVE</button>
+          </div>
+        </form>
+        {% endif %}
+      </div>
+    </article>
+  </main>
 </body>
 </html>
