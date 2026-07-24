@@ -3,227 +3,241 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="Archive Scanner secure Telegram extraction console">
-  <title>Archive Scanner — Neon Grid</title>
-  <link rel="stylesheet" href="/static/neon.css">
+  <meta name="description" content="Archive Scanner operations dashboard">
+  <title>Archive Scanner</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/progress.css">
   <script src="/static/app.js" defer></script>
   <script src="/static/progress.js" defer></script>
-  <script src="/static/neon.js" defer></script>
 </head>
-<body class="neon-body">
-<div class="app-shell">
+<body>
+<div class="app-grid">
   <aside class="rail" aria-label="Primary navigation">
-    <a class="mark" href="/" aria-label="Archive Scanner home">AS</a>
+    <a class="rail-mark" href="/" aria-label="Archive Scanner home">AS</a>
     <nav class="rail-nav">
-      <a class="rail-btn active" href="#overview" data-label="Overview">⌂</a>
-      <a class="rail-btn" href="#queue" data-label="Queue scan">↗</a>
-      <a class="rail-btn" href="#jobs" data-label="Jobs">◫</a>
-      <a class="rail-btn" href="#settings" data-label="Settings">⚙</a>
-      <a class="rail-btn" href="#logs" data-label="Output logs">≡</a>
+      <a class="rail-btn active" href="#overview" data-label="Overview" aria-label="Overview">⌂</a>
+      <a class="rail-btn" href="#queue" data-label="Queue media" aria-label="Queue media">↗</a>
+      <a class="rail-btn" href="#jobs" data-label="Recent jobs" aria-label="Recent jobs">≋</a>
+      <a class="rail-btn" href="#logs" data-label="Output logs" aria-label="Output logs">▤</a>
+      <a class="rail-btn" href="#credentials" data-label="Credentials" aria-label="Credentials">◇</a>
     </nav>
     <div class="rail-bottom">
-      <form method="post" action="/logout">
+      <button class="rail-btn" type="button" data-settings-toggle data-label="Settings" aria-label="Settings" aria-controls="settings-menu" aria-expanded="false">⚙</button>
+      <form class="rail-form" method="post" action="/logout">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <button class="rail-btn power" type="submit" data-label="Sign out" aria-label="Sign out">⏻</button>
       </form>
     </div>
   </aside>
 
-  <main class="shell" id="overview">
+  <div class="settings-menu" id="settings-menu" hidden>
+    <div class="settings-menu-head"><strong>Settings</strong><span>CONTROL</span></div>
+    <a class="settings-link" href="/session-regenerate">
+      <span class="settings-link-icon" aria-hidden="true">↻</span>
+      <span><strong>Session regenerate</strong><small>Replace the Telegram login session</small></span>
+      <span class="settings-link-arrow" aria-hidden="true">›</span>
+    </a>
+  </div>
+
+  <div class="shell">
     <header class="topbar">
-      <div class="brandline"><strong>ARCHIVE SCANNER</strong><span>v5 / secure extraction grid</span></div>
+      <a class="brandline" href="/" aria-label="Archive Scanner dashboard">
+        <span class="brand-mark" aria-hidden="true">AS</span>
+        <span class="brand-copy"><strong>Archive Scanner</strong><span>Telegram security pipeline</span></span>
+      </a>
       <div class="top-actions">
-        <div class="live-pill"><i class="live-dot"></i>worker online</div>
-        <button class="shortcut" id="open-palette" type="button"><span>Command center</span><kbd>/</kbd></button>
-        <div class="avatar" aria-label="Operator">OP</div>
+        <span class="live-pill"><i class="live-dot"></i><span>Worker online</span></span>
+        <button class="top-settings" type="button" data-settings-toggle aria-label="Open settings" aria-controls="settings-menu" aria-expanded="false">⚙</button>
       </div>
     </header>
 
-    <section class="hero">
-      <div>
-        <div class="eyebrow">Secure extraction console</div>
-        <h1>Scan operations at <span class="glow">signal speed.</span></h1>
-        <p>Command authorized Telegram downloads, extraction workers, archive secrets, session access, and credential detection from a real-time operations grid.</p>
-      </div>
-      <div class="hero-code">session state<b>READY / 01</b>{{ ingest.active_count }} active download(s)<br>{{ ingest.queued }} queued</div>
-    </section>
+    <main class="container" id="overview">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Telegram security pipeline</p>
+          <h1>Scan operations, <span class="glow">clearly organized.</span></h1>
+          <p class="hero-copy">Queue authorized Telegram media, monitor extraction, manage encrypted archive passwords, and review redacted findings from one command workspace.</p>
+        </div>
+        <div class="hero-code">System state<b>Operational</b>Local extractor ready</div>
+      </section>
 
-    {% if notice %}<div class="alert success" role="status">{{ notice }}</div>{% endif %}
-    {% if error %}<div class="alert error" role="alert">{{ error }}</div>{% endif %}
+      {% if notice %}<div class="alert success" role="status">{{ notice }}</div>{% endif %}
+      {% if error %}<div class="alert error" role="alert">{{ error }}</div>{% endif %}
 
-    <section class="summary" aria-label="Pipeline statistics">
-      <article class="summary-card primary-summary accent-green">
-        <div><div class="summary-label">Pipeline health</div><div class="summary-value"><strong>LIVE</strong><span>{{ ingest.active_count }} active</span></div></div>
-        <div class="health-ring"><span>READY</span></div>
-      </article>
-      {% for key,label in [('pending','Pending'),('running','Running'),('completed','Successful'),('failed','Failed')] %}
-      <article class="summary-card accent-{{ key }}">
-        <div class="summary-label">{{ label }}</div>
-        <div class="summary-value"><strong>{{ stats[key] }}</strong><span>jobs</span></div>
-        <div class="summary-spark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
-      </article>
-      {% endfor %}
-    </section>
+      <section class="stats" aria-label="Job statistics">
+        <article class="stat pending"><span>Pending</span><strong>{{ stats['pending'] }}</strong><small>jobs</small></article>
+        <article class="stat running"><span>Running</span><strong>{{ stats['running'] }}</strong><small>jobs</small></article>
+        <article class="stat completed"><span>Completed</span><strong>{{ stats['completed'] }}</strong><small>jobs</small></article>
+        <article class="stat failed"><span>Failed</span><strong>{{ stats['failed'] }}</strong><small>jobs</small></article>
+      </section>
 
-    <section class="layout">
-      <div class="stack">
-        <article class="panel command-panel" id="queue">
-          <div class="panel-head">
-            <div><div class="kicker">01 / New transmission</div><h2>Queue Telegram media</h2><div class="panel-note">Authorized URLs and ranges only · maximum 500 messages</div></div>
-            <div class="head-icon">↗</div>
-          </div>
-          <div class="panel-body">
-            <form method="post" action="/channel-links" id="queue-form">
-              <input type="hidden" name="csrf" value="{{ csrf }}">
-              <div class="command-row">
-                <div class="prompt">›</div>
-                <label class="sr-only" for="url">Telegram message URL or range</label>
-                <input class="command-input" id="url" name="url" type="url" inputmode="url" placeholder="https://t.me/channel/100-105" autocomplete="off" required>
-                <button class="run-btn" type="submit">INITIATE SCAN</button>
-              </div>
-              <div class="command-foot"><span>Range format:</span><button class="preset" type="button" data-range="https://t.me/channel/100-105">channel / 100–105</button><span>One message or up to 500 at once</span></div>
-            </form>
-          </div>
-        </article>
-
-        <article class="panel jobs-panel" id="jobs">
-          <div class="panel-head">
-            <div><div class="kicker">02 / Active pipeline</div><h2>Mission queue</h2><div class="panel-note">{{ ingest.active_count }} downloading · {{ ingest.queued }} queued · {{ jobs|length }} visible</div></div>
-            <div class="job-toolbar">
-              <button class="mini-btn refresh" type="button">Refresh</button>
-              <form method="post" action="/jobs/stop-all" data-confirm="Stop all running and pending jobs?">
+      <div class="layout">
+        <div class="main-column stack-layout">
+          <section class="panel queue-panel" id="queue">
+            <div class="panel-head">
+              <div><p class="kicker">01 / New source</p><h2>Queue Telegram media</h2><p class="panel-note">Single post or ranges up to 500 messages.</p></div>
+              <span class="head-icon" aria-hidden="true">↗</span>
+            </div>
+            <div class="panel-body">
+              <form method="post" action="/channel-links" class="queue-form">
                 <input type="hidden" name="csrf" value="{{ csrf }}">
-                <button class="mini-btn stop" type="submit">Stop active</button>
+                <label class="sr-only" for="url">Message URL or range</label>
+                <div class="command-row">
+                  <span class="prompt" aria-hidden="true">›</span>
+                  <input class="command-input" id="url" name="url" type="url" inputmode="url" placeholder="https://t.me/channel/100-105" required>
+                  <button class="command-submit" type="submit">Queue download</button>
+                </div>
+                <p class="form-help">The connected Telegram account must already have access. Example: <code>channel/100-105</code>.</p>
               </form>
             </div>
-          </div>
-          <div class="panel-body job-panel-body">
-            <div class="job-list">
-              {% for job in jobs %}
-              {% set display_status = 'running' if job.status == 'running' or job.progress_stage in ['fetching','downloading'] else job.status %}
-              <article class="job" data-job-id="{{ job.id }}" data-job-status="{{ job.status }}">
-                <div class="job-node">N{{ job.id }}</div>
-                <div class="job-main">
-                  <div class="job-title"><span>#{{ job.id }}</span><b>{{ job.source }}</b><small>Message {{ job.message_id }}</small></div>
-                  <div class="job-meta">
-                    <span class="status {{ display_status }}"><i></i>{{ 'Successful' if display_status == 'completed' else display_status|capitalize }}</span>
-                    <time>{{ job.created_at }}</time>
-                  </div>
-                  {% if job.error %}<div class="error-text" role="alert"><strong>Error:</strong> {{ job.error }}</div>{% endif %}
-                  <div class="dl-progress {% if display_status == 'completed' %}is-complete{% elif display_status == 'failed' %}is-failed{% else %}is-indeterminate{% endif %}" data-progress>
-                    <div class="dl-bar"><i></i></div>
-                    <small class="dl-label">
-                      {% if display_status == 'completed' %}Successful — pipeline complete
-                      {% elif display_status == 'failed' %}Failed — see error details
-                      {% elif display_status == 'running' and job.progress_stage == 'fetching' %}Running — fetching Telegram message…
-                      {% elif display_status == 'running' and job.progress_stage == 'downloading' %}Running — downloading media…
-                      {% elif display_status == 'running' %}Running — extracting and scanning…
-                      {% else %}Pending — waiting for worker{% endif %}
-                    </small>
-                  </div>
-                </div>
-                <div class="job-result">
-                  {% if job.status == 'completed' %}
-                  <div class="metrics"><span><b id="files-{{ job.id }}">—</b> files</span><span><b id="findings-{{ job.id }}">—</b> findings</span></div>
-                  <div class="output-links"><a href="/jobs/{{ job.id }}/report">REPORT</a><a href="/jobs/{{ job.id }}/summary">JSON</a></div>
-                  {% else %}<span class="no-output">NO OUTPUT</span>{% endif %}
-                </div>
-              </article>
-              {% else %}
-              <div class="empty-state"><div class="empty-orbit"></div><strong>NO MISSIONS IN QUEUE</strong><span>Transmit a Telegram source to begin.</span></div>
-              {% endfor %}
+          </section>
+
+          <section class="panel jobs-panel" id="jobs">
+            <div class="panel-head">
+              <div><p class="kicker">02 / Activity</p><h2>Recent jobs</h2><p class="panel-note">Live download and scan status.</p></div>
+              <div class="panel-head-actions">
+                <button class="ghost refresh" type="button">Refresh</button>
+                <form method="post" action="/jobs/stop-all" data-confirm="Stop ALL running and pending jobs? This cannot be undone.">
+                  <input type="hidden" name="csrf" value="{{ csrf }}">
+                  <button class="danger" type="submit">Stop active</button>
+                </form>
+              </div>
             </div>
-          </div>
-        </article>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Job</th><th>Source</th><th>Status</th><th>Created</th><th>Output</th></tr></thead>
+                <tbody>
+                {% for job in jobs %}
+                  {% set display_status = 'running' if job.status == 'running' or job.progress_stage in ['fetching', 'downloading'] else job.status %}
+                  <tr data-job-id="{{ job.id }}" data-job-status="{{ job.status }}">
+                    <td><b>#{{ job.id }}</b><small>Message {{ job.message_id }}</small></td>
+                    <td>{{ job.source }}</td>
+                    <td>
+                      <span class="status {{ display_status }}">{{ 'Successful' if display_status == 'completed' else display_status|capitalize }}</span>
+                      {% if job.error %}<small class="error-text" title="{{ job.error }}">{{ job.error }}</small>{% endif %}
+                      <div class="dl-progress {% if display_status in ['pending', 'running'] %}is-indeterminate{% endif %}" data-progress {% if display_status not in ['pending', 'running'] %}hidden{% endif %}>
+                        <div class="dl-bar"><i></i></div>
+                        <small class="dl-label">
+                          {% if display_status == 'running' and job.progress_stage == 'fetching' %}Running — fetching Telegram message…
+                          {% elif display_status == 'running' and job.progress_stage == 'downloading' %}Running — downloading media…
+                          {% elif display_status == 'running' %}Running — extracting and scanning…
+                          {% elif job.progress_stage == 'queued' %}Pending — waiting for download worker
+                          {% else %}Pending — waiting for worker{% endif %}
+                        </small>
+                      </div>
+                    </td>
+                    <td>{{ job.created_at }}</td>
+                    <td>
+                      {% if job.status == 'completed' %}
+                        <div class="job-output">
+                          <small class="metrics">Files: <strong id="files-{{ job.id }}">—</strong> · Findings: <strong id="findings-{{ job.id }}">—</strong></small>
+                          <div><a href="/jobs/{{ job.id }}/report">Report</a><a href="/jobs/{{ job.id }}/summary">JSON</a></div>
+                        </div>
+                      {% else %}<span class="muted">—</span>{% endif %}
+                    </td>
+                  </tr>
+                {% else %}
+                  <tr><td colspan="5" class="empty">No jobs yet. Queue a Telegram source to begin.</td></tr>
+                {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel logs-panel" id="logs" aria-label="Activity logs">
+            <div class="panel-head">
+              <div><p class="kicker">03 / Event stream</p><h2>Output logs</h2><p class="panel-note">Most recent worker activity.</p></div>
+              <span class="head-icon" aria-hidden="true">▤</span>
+            </div>
+            <div class="logs-container"><div id="logs-list" class="logs-list"><div class="empty">Loading logs…</div></div></div>
+            <p class="panel-footnote">Last 30 entries. Auto-refreshes every 5 seconds.</p>
+          </section>
+        </div>
+
+        <aside class="side-column stack-layout">
+          <section class="panel storage-panel" aria-label="Storage usage">
+            <div class="panel-head"><div><p class="kicker">Storage</p><h2>Downloaded archives</h2></div><span class="head-icon" aria-hidden="true">▣</span></div>
+            <div class="panel-body">
+              <div class="storage-value">{{ storage_human }} <small>used</small></div>
+              <p class="muted">Compressed archives tracked across all jobs.</p>
+              <div class="storage-bar" aria-hidden="true"><span></span></div>
+              <form method="post" action="/cleanup-files" data-confirm="Remove ALL downloaded and extracted files? This cannot be undone.">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <button class="ghost" type="submit">Clean up files</button>
+              </form>
+            </div>
+          </section>
+
+          <section class="panel performance-panel" aria-label="Performance settings">
+            <div class="panel-head"><div><p class="kicker">Performance</p><h2>Extraction workers</h2></div><span class="head-icon" aria-hidden="true">⌁</span></div>
+            <div class="panel-body">
+              <p class="muted">Higher values use more CPU. Maximum 24.</p>
+              <form method="post" action="/config/extraction-workers" class="worker-form" id="workers-form">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <button class="ghost" type="button" id="workers-minus" aria-label="Decrease workers">−</button>
+                <label class="sr-only" for="workers">Extraction workers</label>
+                <input id="workers" name="workers" type="number" min="1" max="24" value="{{ extraction_workers }}" inputmode="numeric" required>
+                <button class="ghost" type="button" id="workers-plus" aria-label="Increase workers">+</button>
+                <button class="save-worker" type="submit">Save worker count</button>
+              </form>
+            </div>
+          </section>
+
+          <section class="panel password-panel">
+            <div class="panel-head"><div><p class="kicker">Extraction</p><h2>Archive passwords</h2></div><span class="head-icon" aria-hidden="true">⌘</span></div>
+            <div class="panel-body">
+              <p class="muted">Encrypted at rest and shared only with the local extractor.</p>
+              <form method="post" action="/passwords" class="inline-form">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <label class="sr-only" for="archive-password">Archive password</label>
+                <input id="archive-password" name="password" type="password" placeholder="Add password" maxlength="512" required>
+                <button type="submit">Add</button>
+              </form>
+              <form method="post" action="/passwords/bulk" class="stack">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <label class="sr-only" for="bulk-passwords">Bulk passwords</label>
+                <textarea id="bulk-passwords" name="passwords" rows="4" placeholder="One password per line"></textarea>
+                <button class="ghost" type="submit">Add multiple passwords</button>
+              </form>
+              <div class="password-list">
+                {% for password in passwords %}
+                  <div class="password-row">
+                    <span><b>Stored token</b><small>{{ password.masked }}</small></span>
+                    <form method="post" action="/passwords/{{ password.id }}/delete" data-confirm="Remove this password?">
+                      <input type="hidden" name="csrf" value="{{ csrf }}">
+                      <button class="danger-link" type="submit">Remove</button>
+                    </form>
+                  </div>
+                {% else %}<div class="empty">No saved passwords</div>{% endfor %}
+              </div>
+              {% if passwords %}
+                <form method="post" action="/passwords/clear" class="stack" data-confirm="Remove ALL stored passwords? This cannot be undone.">
+                  <input type="hidden" name="csrf" value="{{ csrf }}">
+                  <button class="ghost danger-link" type="submit">Remove all passwords</button>
+                </form>
+              {% endif %}
+            </div>
+          </section>
+        </aside>
       </div>
 
-      <aside class="stack side-stack" id="settings">
-        <article class="panel">
-          <div class="panel-head"><div><div class="kicker">Storage node</div><h2>Local archives</h2></div><div class="head-icon">▣</div></div>
-          <div class="panel-body">
-            <div class="data-row"><div class="big-number">{{ storage_human }}</div><div class="capacity">tracked compressed files</div></div>
-            <div class="meter"><span></span></div>
-            <form method="post" action="/cleanup-files" data-confirm="Remove all downloaded, extracted, and output files?">
-              <input type="hidden" name="csrf" value="{{ csrf }}">
-              <button class="full-btn" type="submit">Purge downloaded files</button>
-            </form>
-          </div>
-        </article>
-
-        <article class="panel">
-          <div class="panel-head"><div><div class="kicker">Compute mesh</div><h2>Extraction workers</h2></div><div class="head-icon">↯</div></div>
-          <div class="panel-body">
-            <form method="post" action="/config/extraction-workers" id="workers-form">
-              <input type="hidden" name="csrf" value="{{ csrf }}">
-              <div class="stepper">
-                <button type="button" id="workers-minus" aria-label="Decrease workers">−</button>
-                <label class="sr-only" for="workers">Extraction workers</label>
-                <input class="step-value" id="workers" name="workers" type="number" min="1" max="24" value="{{ extraction_workers }}" required>
-                <button type="button" id="workers-plus" aria-label="Increase workers">+</button>
-              </div>
-              <button class="full-btn" type="submit">Deploy worker count</button>
-            </form>
-            <div class="panel-note">Maximum 24 local extraction workers.</div>
-          </div>
-        </article>
-
-        <article class="panel">
-          <div class="panel-head"><div><div class="kicker">Account settings</div><h2>Telegram session</h2></div><div class="head-icon">◉</div></div>
-          <div class="panel-body">
-            <p class="panel-note">Generate and persist a new Telegram session using phone verification and optional 2FA.</p>
-            <a class="full-btn link-btn" href="/session-regenerate">Open session generator</a>
-          </div>
-        </article>
-
-        <article class="panel" id="secrets">
-          <div class="panel-head"><div><div class="kicker">Secret vault</div><h2>Archive passwords</h2></div><div class="head-icon">⌁</div></div>
-          <div class="panel-body">
-            <div class="panel-note">Encrypted at rest. Shared only with the local extractor.</div>
-            <form method="post" action="/passwords" class="password-line">
-              <input type="hidden" name="csrf" value="{{ csrf }}">
-              <label class="sr-only" for="archive-password">Archive password</label>
-              <input id="archive-password" name="password" type="password" placeholder="password token" maxlength="512" required>
-              <button type="submit">ADD</button>
-            </form>
-            <details class="bulk-details"><summary>Add multiple tokens</summary><form method="post" action="/passwords/bulk"><input type="hidden" name="csrf" value="{{ csrf }}"><label class="sr-only" for="bulk-passwords">Bulk passwords</label><textarea id="bulk-passwords" name="passwords" rows="4" placeholder="One password per line" required></textarea><button class="full-btn" type="submit">Store tokens</button></form></details>
-            <div class="chip-zone">
-              {% for password in passwords %}
-              <div class="secret-chip"><span>KEY_{{ loop.index }} / {{ password.masked }}</span><form method="post" action="/passwords/{{ password.id }}/delete" data-confirm="Remove this password?"><input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" aria-label="Remove password">×</button></form></div>
-              {% else %}<div class="none">vault empty</div>{% endfor %}
-            </div>
-            {% if passwords %}<form method="post" action="/passwords/clear" data-confirm="Remove all stored passwords?"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="text-danger" type="submit">Clear entire vault</button></form>{% endif %}
-          </div>
-        </article>
-      </aside>
-    </section>
-
-    <section class="bottom-grid">
-      <article class="panel" id="logs">
-        <div class="panel-head"><div><div class="kicker">03 / Event stream</div><h2>System output</h2></div><div class="head-icon">≡</div></div>
-        <div class="panel-body"><div class="terminal"><div id="logs-list" class="logs-list"><div class="empty compact">Loading event stream…</div></div></div></div>
-      </article>
-      <article class="panel" id="credentials-panel">
-        <div class="panel-head"><div><div class="kicker">04 / Extracted</div><h2>AWS credentials</h2></div><div class="head-icon">◇</div></div>
-        <div class="panel-body">
-          <div id="credentials-list" class="credential-zone"><div class="empty compact">No credentials detected.</div></div>
-          <div class="credential-actions"><a href="/credentials/export" class="full-btn link-btn" id="export-btn" aria-disabled="true">Export credentials</a><form method="post" action="/credentials/clear-all" data-confirm="Delete all extracted credentials?"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="full-btn danger" type="submit" id="clear-btn" disabled>Clear</button></form></div>
+      <section class="panel credentials-panel" id="credentials">
+        <div class="panel-head">
+          <div><p class="kicker">04 / Extracted</p><h2>AWS credentials</h2><p class="panel-note">Most recent entries first. Secrets remain shortened here.</p></div>
+          <span class="head-icon" aria-hidden="true">◇</span>
         </div>
-      </article>
-    </section>
+        <div class="credentials-container"><div id="credentials-list" class="credentials-list"><div class="empty">No credentials yet.</div></div></div>
+        <div class="credentials-actions">
+          <a class="button-link ghost is-disabled" href="/credentials/export" id="export-btn" aria-disabled="true" tabindex="-1">Export</a>
+          <form method="post" action="/credentials/clear-all" data-confirm="Delete ALL credentials?">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button class="danger" type="submit" id="clear-btn" disabled>Clear credentials</button>
+          </form>
+        </div>
+      </section>
 
-    <footer>Only inspect channels and files you own or are authorized to access.</footer>
-  </main>
-</div>
-
-<div class="command-palette" id="command-palette" role="dialog" aria-modal="true" aria-label="Command center">
-  <div class="palette">
-    <div class="palette-search"><span>›</span><input id="palette-input" placeholder="Type a command…" autocomplete="off"></div>
-    <div class="palette-items">
-      <button class="palette-item" type="button" data-command="queue"><span>Focus Telegram queue</span><kbd>Q</kbd></button>
-      <button class="palette-item" type="button" data-command="settings"><span>Open settings</span><kbd>G</kbd></button>
-      <a class="palette-item" href="/session-regenerate"><span>Generate Telegram session</span><kbd>S</kbd></a>
-      <button class="palette-item" type="button" data-command="logs"><span>Open event stream</span><kbd>L</kbd></button>
-    </div>
+      <footer>Only inspect channels and files you own or are authorized to access.</footer>
+    </main>
   </div>
 </div>
 </body>

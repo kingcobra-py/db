@@ -1,1 +1,16 @@
-.dl-progress{width:100%;max-width:320px;margin-top:8px}.dl-progress[hidden]{display:none}.dl-bar{position:relative;height:6px;overflow:hidden;border-radius:999px;background:rgba(102,112,133,.2)}.dl-bar>i{position:absolute;inset:0 auto 0 0;width:0;border-radius:inherit;background:linear-gradient(90deg,var(--blue),#6b7ee8);transition:width .35s ease}.dl-label{display:block;margin-top:5px;color:var(--muted);font-size:11px;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}@media(prefers-reduced-motion:reduce){.dl-bar>i{transition:none}}
+/* Active download progress. Kept external for strict Content-Security-Policy support. */
+.dl-progress{margin-top:.55rem;max-width:260px}
+.dl-progress[hidden]{display:none}
+.dl-bar{position:relative;height:7px;border-radius:999px;background:rgba(187,221,255,.08);border:1px solid rgba(187,221,255,.09);overflow:hidden}
+.dl-bar>i{position:absolute;inset:0 auto 0 0;width:0%;border-radius:999px;background:linear-gradient(90deg,var(--cyan,#66ddff),var(--blue,#5f85ff),var(--violet,#a478ff));box-shadow:0 0 14px rgba(102,221,255,.28);transition:width .45s cubic-bezier(.16,.8,.22,1)}
+.dl-label{display:block;margin-top:.35rem;font:700 .68rem/1.35 ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--muted,#9bb0c4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dl-progress.is-indeterminate .dl-bar>i{width:38%!important;animation:progress-slide 1.15s ease-in-out infinite}
+.dl-progress.is-complete .dl-bar>i{width:100%;background:linear-gradient(90deg,#36bd7e,var(--green,#63e6a5));box-shadow:0 0 12px rgba(99,230,165,.35)}
+.dl-progress.is-complete .dl-label{color:var(--green,#63e6a5)}
+.dl-progress.is-failed .dl-bar>i{width:100%;background:linear-gradient(90deg,#9d3e4b,var(--red,#ff7d86));box-shadow:0 0 12px rgba(255,125,134,.3)}
+.dl-progress.is-failed .dl-label{color:var(--red,#ff7d86)}
+@keyframes progress-slide{from{left:-38%}to{left:100%}}
+@media(prefers-reduced-motion:reduce){
+  .dl-bar>i{transition:none}
+  .dl-progress.is-indeterminate .dl-bar>i{animation:none}
+}
