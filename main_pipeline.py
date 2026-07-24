@@ -48,10 +48,6 @@ class Pipeline:
         self._active_tasks:set[asyncio.Task]=set()
         self._stop_generation=0
         self._ingest_worker_heartbeat=0.0
-        # Hard ceiling per download so one hung Telegram transfer can never
-        # block the whole ingest queue forever (see: jobs stuck in 'active').
-        self._ingest_job_timeout=300  # 5 minutes timeout per download
-        self._ingest_job_start_times:dict[int,float]={}
 
     def set_extraction_workers(self, workers: int) -> None:
         workers = max(1, min(24, int(workers)))
@@ -347,25 +343,9 @@ class Pipeline:
             'Parallel ingest job started',
             extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest'},
         )
-        # Track start time for timeout / stuck-job visibility.
-        self._ingest_job_start_times[job_id] = time.monotonic()
-        try:
-            await asyncio.wait_for(
-                self.ingest_channel_link(url, job_id, job_key),
-                timeout=self._ingest_job_timeout,
-            )
-        except asyncio.TimeoutError:
-            LOG.warning(
-                'Ingest job timeout after %s seconds',
-                self._ingest_job_timeout,
-                extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest'},
-            )
-            await asyncio.to_thread(
-                self.db.mark_failed, job_id,
-                f'Download timeout after {self._ingest_job_timeout}s - Telegram server may be slow',
-            )
-        finally:
-            self._ingest_job_start_times.pop(job_id, None)
+        # Telegram downloads may legitimately take much longer than five minutes.
+        # Cancellation remains available through Stop active and service shutdown.
+        await self.ingest_channel_link(url, job_id, job_key)
         await asyncio.sleep(0.75)
 
     async def ingest_channel_link(self,url:str, job_id:int|None=None, job_key:int|None=None):
@@ -381,24 +361,15 @@ class Pipeline:
             LOG.info('Starting channel ingest', extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest'})
             target,message_id=self.validate_channel_link(url)
             if target.startswith('c:'):
-                entity = await asyncio.wait_for(
-                    self.client.get_entity(PeerChannel(int(target[2:]))),
-                    timeout=60,
-                )
+                entity = await self.client.get_entity(PeerChannel(int(target[2:])))
             else:
-                entity = await asyncio.wait_for(self.client.get_entity(target), timeout=60)
-            message = await asyncio.wait_for(
-                self.client.get_messages(entity, ids=message_id),
-                timeout=60,
-            )
+                entity = await self.client.get_entity(target)
+            message = await self.client.get_messages(entity, ids=message_id)
             if not message: raise ValueError('Message is unavailable to the signed-in Telegram account')
             messages=[message]
             if message.grouped_id:
                 # Pull a wider nearby window so large albums are not truncated.
-                nearby = await asyncio.wait_for(
-                    self.client.get_messages(entity, limit=100, offset_id=message_id + 50),
-                    timeout=60,
-                )
+                nearby = await self.client.get_messages(entity, limit=100, offset_id=message_id + 50)
                 messages=sorted({m.id:m for m in [message,*nearby] if m and m.grouped_id==message.grouped_id and m.media}.values(),key=lambda m:m.id)
             await asyncio.to_thread(
                 self.db.update_progress, job_id, 'downloading', 0, 0,
@@ -412,9 +383,6 @@ class Pipeline:
         except asyncio.CancelledError:
             await asyncio.to_thread(self.db.mark_failed, job_id, 'Stopped by operator')
             raise
-        except asyncio.TimeoutError:
-            LOG.exception('Channel link ingest timed out', extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest'})
-            await asyncio.to_thread(self.db.mark_failed, job_id, 'Timeout while fetching Telegram message')
         except FloodWaitError as exc:
             # Cap sleep so one flood-wait cannot freeze the whole ingest queue for hours.
             wait_for = min(int(exc.seconds) + 1, 90)

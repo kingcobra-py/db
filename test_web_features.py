@@ -61,8 +61,6 @@ class IngestSchedulingTests(unittest.IsolatedAsyncioTestCase):
         pipeline._ingest_tasks = {}
         pipeline._ingest_supervisor_task = None
         pipeline._ingest_worker_heartbeat = 0.0
-        pipeline._ingest_job_timeout = 300
-        pipeline._ingest_job_start_times = {}
         started = []
         release = __import__('asyncio').Event()
 
