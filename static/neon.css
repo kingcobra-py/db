@@ -397,6 +397,10 @@ h1 { margin: 11px 0 12px; font-size: clamp(40px, 6.2vw, 78px); line-height: .9; 
 .dl-bar > i { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: inherit; background: linear-gradient(90deg, var(--lime), var(--cyan), var(--violet)); box-shadow: 0 0 12px rgba(102, 221, 255, .3); transition: width .4s var(--ease); }
 .dl-label { display: block; margin-top: 5px; color: var(--muted); font: 650 9px/1.4 ui-monospace, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dl-progress.is-indeterminate .dl-bar > i { width: 38% !important; animation: progress-slide 1.15s ease-in-out infinite; }
+.dl-progress.is-complete .dl-bar > i { width: 100%; background: linear-gradient(90deg, #36bd7e, var(--green)); box-shadow: 0 0 12px rgba(99, 230, 165, .35); }
+.dl-progress.is-complete .dl-label { color: var(--green); }
+.dl-progress.is-failed .dl-bar > i { width: 100%; background: linear-gradient(90deg, #9d3e4b, var(--red)); box-shadow: 0 0 12px rgba(255, 125, 134, .3); }
+.dl-progress.is-failed .dl-label { color: var(--red); }
 .empty-state, .empty { min-height: 170px; display: grid; place-items: center; text-align: center; color: var(--muted); font: 700 10px ui-monospace, monospace; }
 .empty.compact { min-height: 80px; }
 .empty-state strong { display: block; color: #e7f3fb; margin-top: 10px; }

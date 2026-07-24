@@ -110,7 +110,17 @@
                     <time>{{ job.created_at }}</time>
                   </div>
                   {% if job.error %}<div class="error-text" role="alert"><strong>Error:</strong> {{ job.error }}</div>{% endif %}
-                  <div class="dl-progress" data-progress hidden><div class="dl-bar"><i></i></div><small class="dl-label"></small></div>
+                  <div class="dl-progress {% if display_status == 'completed' %}is-complete{% elif display_status == 'failed' %}is-failed{% else %}is-indeterminate{% endif %}" data-progress>
+                    <div class="dl-bar"><i></i></div>
+                    <small class="dl-label">
+                      {% if display_status == 'completed' %}Successful — pipeline complete
+                      {% elif display_status == 'failed' %}Failed — see error details
+                      {% elif display_status == 'running' and job.progress_stage == 'fetching' %}Running — fetching Telegram message…
+                      {% elif display_status == 'running' and job.progress_stage == 'downloading' %}Running — downloading media…
+                      {% elif display_status == 'running' %}Running — extracting and scanning…
+                      {% else %}Pending — waiting for worker{% endif %}
+                    </small>
+                  </div>
                 </div>
                 <div class="job-result">
                   {% if job.status == 'completed' %}
