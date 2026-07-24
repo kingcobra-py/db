@@ -48,6 +48,10 @@ class Pipeline:
         self._active_tasks:set[asyncio.Task]=set()
         self._stop_generation=0
         self._ingest_worker_heartbeat=0.0
+        # Hard ceiling per download so one hung Telegram transfer can never
+        # block the whole ingest queue forever (see: jobs stuck in 'active').
+        self._ingest_job_timeout=300  # 5 minutes timeout per download
+        self._ingest_job_start_times:dict[int,float]={}
 
     def set_extraction_workers(self, workers: int) -> None:
         workers = max(1, min(24, int(workers)))
@@ -343,7 +347,25 @@ class Pipeline:
             'Parallel ingest job started',
             extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest'},
         )
-        await self.ingest_channel_link(url, job_id, job_key)
+        # Track start time for timeout / stuck-job visibility.
+        self._ingest_job_start_times[job_id] = time.monotonic()
+        try:
+            await asyncio.wait_for(
+                self.ingest_channel_link(url, job_id, job_key),
+                timeout=self._ingest_job_timeout,
+            )
+        except asyncio.TimeoutError:
+            LOG.warning(
+                'Ingest job timeout after %s seconds',
+                self._ingest_job_timeout,
+                extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest'},
+            )
+            await asyncio.to_thread(
+                self.db.mark_failed, job_id,
+                f'Download timeout after {self._ingest_job_timeout}s - Telegram server may be slow',
+            )
+        finally:
+            self._ingest_job_start_times.pop(job_id, None)
         await asyncio.sleep(0.75)
 
     async def ingest_channel_link(self,url:str, job_id:int|None=None, job_key:int|None=None):
