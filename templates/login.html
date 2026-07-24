@@ -1,3 +1,26 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in · Archive Scanner</title><link rel="stylesheet" href="/static/styles.css"></head>
-<body class="login-shell"><main class="login-card"><div class="brand-mark" aria-hidden="true">A</div><p class="eyebrow">Secure workspace</p><h1>Archive Scanner</h1><p class="muted">Sign in to manage downloads, archive passwords, and scan reports.</p>{% if error %}<div class="alert error" role="alert">{{ error }}</div>{% endif %}<form method="post" action="/login" class="stack"><label for="password">Dashboard password</label><input id="password" name="password" type="password" autocomplete="current-password" required autofocus><button type="submit">Continue</button></form><p class="fine-print">Authorized access only. Credentials are never displayed in reports.</p></main></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Sign in to Archive Scanner">
+  <title>Sign in · Archive Scanner</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body class="login-shell">
+  <main class="login-card">
+    <div class="brand-mark" aria-hidden="true">AS</div>
+    <div class="login-status"><i></i>Secure local workspace</div>
+    <p class="eyebrow">Authorized access</p>
+    <h1>Archive Scanner</h1>
+    <p class="muted">Sign in to manage Telegram downloads, encrypted archive passwords, and redacted scan reports.</p>
+    {% if error %}<div class="alert error" role="alert">{{ error }}</div>{% endif %}
+    <form method="post" action="/login" class="stack">
+      <label for="password">Dashboard password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" placeholder="Enter secure password" required autofocus>
+      <button type="submit">Enter command center</button>
+    </form>
+    <p class="fine-print">Authorized access only. Extracted secrets are shortened in the dashboard and redacted from reports.</p>
+  </main>
+</body>
+</html>

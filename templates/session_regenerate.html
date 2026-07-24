@@ -3,52 +3,89 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="Generate a new Telegram session for Archive Scanner">
-  <title>Telegram Session — Archive Scanner</title>
-  <link rel="stylesheet" href="/static/neon.css">
+  <meta name="description" content="Archive Scanner Telegram session settings">
+  <title>Settings · Session Regenerate</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
 </head>
-<body class="neon-body">
-  <main class="session-shell">
-    <header class="topbar session-topbar">
-      <a class="brandline" href="/"><strong>ARCHIVE SCANNER</strong><span>settings / Telegram session</span></a>
-      <div class="live-pill"><i class="live-dot"></i>secure flow</div>
+<body>
+<div class="app-grid">
+  <aside class="rail" aria-label="Primary navigation">
+    <a class="rail-mark" href="/" aria-label="Archive Scanner home">AS</a>
+    <nav class="rail-nav">
+      <a class="rail-btn" href="/" data-label="Dashboard" aria-label="Dashboard">⌂</a>
+    </nav>
+    <div class="rail-bottom">
+      <button class="rail-btn active" type="button" data-settings-toggle data-settings-current="true" data-label="Settings" aria-label="Settings" aria-controls="settings-menu" aria-expanded="false">⚙</button>
+    </div>
+  </aside>
+
+  <div class="settings-menu" id="settings-menu" hidden>
+    <div class="settings-menu-head"><strong>Settings</strong><span>CONTROL</span></div>
+    <a class="settings-link" href="/session-regenerate" aria-current="page">
+      <span class="settings-link-icon" aria-hidden="true">↻</span>
+      <span><strong>Session regenerate</strong><small>Replace the Telegram login session</small></span>
+      <span class="settings-link-arrow" aria-hidden="true">›</span>
+    </a>
+  </div>
+
+  <div class="shell">
+    <header class="topbar">
+      <a class="brandline" href="/">
+        <span class="brand-mark" aria-hidden="true">AS</span>
+        <span class="brand-copy"><strong>Archive Scanner</strong><span>Settings workspace</span></span>
+      </a>
+      <div class="top-actions">
+        <a class="back-link" href="/">← Dashboard</a>
+        <button class="top-settings" type="button" data-settings-toggle data-settings-current="true" aria-label="Open settings" aria-controls="settings-menu" aria-expanded="false">⚙</button>
+      </div>
     </header>
 
-    <article class="panel session-card">
-      <div class="panel-head">
-        <div><div class="kicker">Account settings</div><h2>Generate Telegram session</h2><div class="panel-note">Replace the connected Telegram account session securely.</div></div>
-        <div class="head-icon">◉</div>
-      </div>
-      <div class="panel-body">
-        {% if step == 1 %}
-        <div class="eyebrow">Step 01 / Request verification</div>
-        <form method="post" action="/session-regenerate/send-code" class="session-form">
-          <input type="hidden" name="csrf" value="{{ csrf }}">
-          <label for="phone-number">Phone number</label>
-          <input id="phone-number" name="phone_number" type="tel" autocomplete="tel" placeholder="+1234567890" required>
-          <div class="panel-note">Include the international country code. Telegram will send a login code.</div>
-          <div class="session-actions">
-            <a class="full-btn link-btn" href="/">Back to dashboard</a>
-            <button class="run-btn" type="submit">SEND CODE</button>
+    <main class="container settings-page">
+      <section class="settings-hero">
+        <div><p class="eyebrow">Settings / Telegram account</p><h1>Session <span class="glow">regenerate.</span></h1><p class="hero-copy">Replace the Telegram authorization session used by the local ingest worker.</p></div>
+      </section>
+
+      {% if notice %}<div class="alert success" role="status">{{ notice }}</div>{% endif %}
+      {% if error %}<div class="alert error" role="alert">{{ error }}</div>{% endif %}
+
+      <div class="settings-grid">
+        <nav class="panel settings-nav" aria-label="Settings sections">
+          <a class="active" href="/session-regenerate" aria-current="page"><span aria-hidden="true">↻</span>Session regenerate</a>
+        </nav>
+
+        <section class="panel settings-content">
+          <div class="panel-head">
+            <div><p class="kicker">Account security</p><h2>Telegram session</h2><p class="panel-note">Phone verification and optional two-factor authentication.</p></div>
+            <span class="head-icon" aria-hidden="true">↻</span>
           </div>
-        </form>
-        {% elif step == 2 %}
-        <div class="eyebrow">Step 02 / Verify account</div>
-        <form method="post" action="/session-regenerate/verify-code" class="session-form">
-          <input type="hidden" name="csrf" value="{{ csrf }}">
-          <div class="panel-note">Verification code sent to <strong>{{ phone }}</strong>.</div>
-          <label for="telegram-code">Telegram code</label>
-          <input id="telegram-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="12345" required>
-          <label for="telegram-password">Two-factor password (optional)</label>
-          <input id="telegram-password" name="password" type="password" autocomplete="current-password" placeholder="Leave blank if disabled">
-          <div class="session-actions">
-            <a class="full-btn link-btn" href="/session-regenerate">Start over</a>
-            <button class="run-btn" type="submit">VERIFY &amp; SAVE</button>
+          <div class="panel-body">
+            {% if step == 1 %}
+              <div class="session-step"><i></i>Step 1 of 2 · Request login code</div>
+              <form method="post" action="/session-regenerate/send-code" class="stack">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <label for="phone-number">Phone number</label>
+                <input id="phone-number" name="phone_number" type="tel" inputmode="tel" autocomplete="tel" placeholder="+1234567890" required>
+                <p class="form-help">Include the international country code.</p>
+                <button type="submit">Send verification code</button>
+              </form>
+            {% elif step == 2 %}
+              <div class="session-step"><i></i>Step 2 of 2 · Verify account</div>
+              <form method="post" action="/session-regenerate/verify-code" class="stack">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <p class="muted">A Telegram login code was sent to <strong>{{ phone }}</strong>.</p>
+                <label for="session-code">Verification code</label>
+                <input id="session-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="12345" required>
+                <label for="session-password">Two-factor password <span class="muted">(optional)</span></label>
+                <input id="session-password" name="password" type="password" autocomplete="current-password" placeholder="Leave blank when disabled">
+                <button type="submit">Verify and update session</button>
+              </form>
+            {% endif %}
           </div>
-        </form>
-        {% endif %}
+        </section>
       </div>
-    </article>
-  </main>
+    </main>
+  </div>
+</div>
 </body>
 </html>
