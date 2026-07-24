@@ -219,7 +219,10 @@ class ArchiveProcessor:
             if not entry.is_dir():
                 expanded += int(entry.file_size)
         if count == 0:
-            raise ExtractionError("ZIP archive contains no entries")
+            # A ZIP with a valid, readable central directory but zero entries is
+            # legitimately empty (or contains only directory placeholders that were
+            # not counted). Treat it as a valid, empty archive rather than an error.
+            return 0, 0
         return count, expanded
 
     def _inspect(self, archive: Path, password: str | None) -> tuple[int, int]:
