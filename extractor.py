@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from config import Settings
 
@@ -196,14 +197,50 @@ class ArchiveProcessor:
             return "unsupported compression method"
         return text[:limit]
 
+    def _inspect_zip_native(self, archive: Path) -> tuple[int, int]:
+        """Inspect a standard ZIP via its central directory.
+
+        This is a fallback for valid ZIPs when p7zip emits an unexpected `-slt`
+        listing format or cannot list a compression method it can still extract.
+        """
+        try:
+            with zipfile.ZipFile(archive) as zipped:
+                entries = zipped.infolist()
+        except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+            raise ExtractionError(f"ZIP central directory is unreadable: {exc}") from exc
+
+        count = 0
+        expanded = 0
+        for entry in entries:
+            validate_member(entry.filename)
+            count += 1
+            if count > self.s.max_archive_files:
+                raise ExtractionError("Archive file-count limit exceeded")
+            if not entry.is_dir():
+                expanded += int(entry.file_size)
+        if count == 0:
+            raise ExtractionError("ZIP archive contains no entries")
+        return count, expanded
+
     def _inspect(self, archive: Path, password: str | None) -> tuple[int, int]:
         result = self._run(["l", "-slt", "-bd", "-y", self._password_arg(password), str(archive)])
         if result.returncode != 0:
+            if archive.name.lower().endswith(".zip"):
+                try:
+                    inspected = self._inspect_zip_native(archive)
+                    LOG.warning(
+                        "p7zip listing failed for %s; native ZIP inspection found %s entries",
+                        archive.name, inspected[0],
+                    )
+                    return inspected
+                except ExtractionError:
+                    pass
             raise ExtractionError(f"Archive listing failed: {self._summarize_7z_output(result.stdout)}")
         count = expanded = 0
         in_entries = False
         is_directory = False
         for line in result.stdout.splitlines():
+            line = line.strip()
             if line.startswith("----------"):
                 in_entries = True
                 continue
@@ -219,7 +256,17 @@ class ArchiveProcessor:
             if count > self.s.max_archive_files:
                 raise ExtractionError("Archive file-count limit exceeded")
         if count == 0:
-            raise ExtractionError("Archive is empty or unreadable")
+            if archive.name.lower().endswith(".zip"):
+                inspected = self._inspect_zip_native(archive)
+                LOG.warning(
+                    "p7zip listing parser found no entries for %s; native ZIP inspection found %s",
+                    archive.name, inspected[0],
+                )
+                return inspected
+            raise ExtractionError(
+                "Archive listing returned no recognizable entries; the archive may be empty, "
+                "incomplete, or use an unsupported listing format"
+            )
         return count, expanded
 
     def _verify_disk(self, expanded: int) -> None:

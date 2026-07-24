@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from database_manager import DatabaseManager
-from extractor import validate_member, ExtractionError, is_rar
+from extractor import ArchiveProcessor, validate_member, ExtractionError, is_rar
 from parse_credentials import scan_tree, write_results
 
 
@@ -18,6 +20,28 @@ class SecurityTests(unittest.TestCase):
         self.assertTrue(is_rar(Path("logs.rar")))
         self.assertTrue(is_rar(Path("@Channel Logs.part1.rar")))
         self.assertFalse(is_rar(Path("logs.zip")))
+
+    def test_valid_zip_falls_back_when_7z_listing_is_unrecognized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "valid.zip"
+            with zipfile.ZipFile(archive, "w") as zipped:
+                zipped.writestr("wallets/data.txt", "valid-data")
+            processor = object.__new__(ArchiveProcessor)
+            processor.s = SimpleNamespace(max_archive_files=100)
+            processor._run = lambda args: SimpleNamespace(returncode=0, stdout="unexpected listing format")
+            count, expanded = processor._inspect(archive, None)
+            self.assertEqual(count, 1)
+            self.assertEqual(expanded, len("valid-data"))
+
+    def test_native_zip_fallback_rejects_traversal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "unsafe.zip"
+            with zipfile.ZipFile(archive, "w") as zipped:
+                zipped.writestr("../escape.txt", "no")
+            processor = object.__new__(ArchiveProcessor)
+            processor.s = SimpleNamespace(max_archive_files=100)
+            with self.assertRaises(ExtractionError):
+                processor._inspect_zip_native(archive)
 
     def test_scanner_redacts_secret(self):
         with tempfile.TemporaryDirectory() as tmp:
