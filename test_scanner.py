@@ -87,6 +87,43 @@ class SecurityTests(unittest.TestCase):
             findings, summary = scan_tree(root, 100_000, b"test-key")
             self.assertEqual(summary["by_type"]["aws_session_token"], 0)
 
+    def test_large_file_scanned_when_unlimited(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            huge = root / "dump.txt"
+            # Build a file larger than a tiny cap would allow; max_file_bytes=0 must not skip it.
+            payload = "aws_access_key_id=AKIAABCDEFGHIJKLMNOP\naws_secret_access_key=" + ("A" * 40) + "\n"
+            huge.write_text(payload * 1000, encoding="utf-8")
+            findings, summary = scan_tree(root, 0, b"test-key")
+            self.assertEqual(summary["files_scanned"], 1)
+            self.assertEqual(summary["findings"], 2000)
+            self.assertEqual(summary.get("files_skipped", 0), 0)
+
+    def test_large_file_skipped_when_capped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            huge = root / "dump.txt"
+            huge.write_text("aws_access_key_id=AKIAABCDEFGHIJKLMNOP\n" + ("x" * 5000), encoding="utf-8")
+            findings, summary = scan_tree(root, 100, b"test-key")
+            self.assertEqual(summary["files_scanned"], 0)
+            self.assertEqual(summary["findings"], 0)
+
+    def test_extract_raw_respects_unlimited_size(self):
+        from parse_credentials import extract_raw_credentials
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "creds.txt"
+            path.write_text(
+                "aws_access_key_id=AKIAABCDEFGHIJKLMNOP\n"
+                "aws_secret_access_key=" + ("Z" * 40) + "\n"
+                "region=us-east-1\n",
+                encoding="utf-8",
+            )
+            # Hardcoded 1MB bug used to skip nothing here, but ensure API accepts max_file_bytes=0.
+            creds = extract_raw_credentials(root, max_workers=2, max_file_bytes=0)
+            self.assertEqual(len(creds), 1)
+            self.assertEqual(creds[0]["access_key"], "AKIAABCDEFGHIJKLMNOP")
+
     def test_unscanned_suffix_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -82,7 +82,8 @@ def load_settings() -> Settings:
         max_expanded_bytes=non_negative_int("MAX_EXPANDED_BYTES", 0),
         # 0 disables archive file-count cap; free disk remains the hard stop.
         max_archive_files=non_negative_int("MAX_ARCHIVE_FILES", 0),
-        max_scan_file_bytes=positive_int("MAX_SCAN_FILE_BYTES", 100 * 1024**2),
+        # 0 disables per-file scan size cap (needed for large .txt / log dumps).
+        max_scan_file_bytes=non_negative_int("MAX_SCAN_FILE_BYTES", 0),
         max_nesting_depth=positive_int("MAX_NESTING_DEPTH", 3),
         min_free_bytes=positive_int("MIN_FREE_BYTES", 1024**3),
         extraction_timeout_seconds=positive_int("EXTRACTION_TIMEOUT_SECONDS", 1800),

