@@ -198,7 +198,8 @@ class Dashboard:
             if not self._authorized(request): return RedirectResponse('/login',303)
             if self.pipeline is not None:
                 self.pipeline.kick_ingest()
-            stats=await asyncio.to_thread(self.db.stats); jobs=await asyncio.to_thread(self.db.recent,30)
+            # Show enough rows that Running/Failed jobs are not hidden behind a large range submit.
+            stats=await asyncio.to_thread(self.db.stats); jobs=await asyncio.to_thread(self.db.recent,100)
             passwords=await asyncio.to_thread(self.passwords.list_masked)
             storage_bytes=await asyncio.to_thread(self.db.get_total_compressed_size)
             extraction_workers=await asyncio.to_thread(self.db.get_extraction_workers,self.s.extraction_workers)

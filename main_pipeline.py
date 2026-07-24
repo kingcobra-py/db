@@ -337,7 +337,7 @@ class Pipeline:
         if self._stop_requested.is_set():
             return
         current = await asyncio.to_thread(self.db.get_job, job_id)
-        if not current or current.status != 'pending' or current.input_files:
+        if not current or current.status not in {'pending','running'} or current.input_files:
             return
         LOG.info(
             'Parallel ingest job started',

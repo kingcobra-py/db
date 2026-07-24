@@ -6,6 +6,7 @@
   <title>Archive Scanner</title>
   <link rel="stylesheet" href="/static/styles.css">
   <link rel="stylesheet" href="/static/progress.css">
+  <link rel="stylesheet" href="/static/status.css">
   <script src="/static/app.js" defer></script>
   <script src="/static/progress.js" defer></script>
 </head>
@@ -22,7 +23,7 @@
   {% if error %}<div class="alert error" role="alert">{{ error }}</div>{% endif %}
 
   <section class="stats" aria-label="Job statistics">
-    {% for key,label in [('pending','Pending'),('running','Running'),('completed','Completed'),('failed','Failed')] %}
+    {% for key,label in [('pending','Pending'),('running','Running'),('completed','Successful'),('failed','Failed')] %}
     <article class="stat stat-{{ key }}"><span>{{ label }}</span><strong>{{ stats[key] }}</strong><small>jobs</small></article>
     {% endfor %}
   </section>
@@ -46,7 +47,8 @@
           {% for job in jobs %}
           <article class="job-card" data-job-id="{{ job.id }}" data-job-status="{{ job.status }}">
             <div class="job-identity"><strong>#{{ job.id }}</strong><span class="source-badge">{{ job.source }}</span><small>Message {{ job.message_id }}</small></div>
-            <div class="job-state"><span class="status {{ job.status }}"><i></i>{{ job.status }}</span>{% if job.error %}<small class="error-text" title="{{ job.error }}">{{ job.error }}</small>{% endif %}<div class="dl-progress" data-progress hidden><div class="dl-bar"><i></i></div><small class="dl-label"></small></div></div>
+            {% set display_status = 'running' if job.status == 'running' or job.progress_stage in ['fetching','downloading'] else job.status %}
+            <div class="job-state"><span class="status {{ display_status }}"><i></i>{{ 'successful' if display_status == 'completed' else display_status }}</span>{% if job.error %}<div class="error-text" role="alert"><strong>Error:</strong> {{ job.error }}</div>{% endif %}<div class="dl-progress" data-progress hidden><div class="dl-bar"><i></i></div><small class="dl-label"></small></div></div>
             <div class="job-time"><span>Created</span><time>{{ job.created_at }}</time></div>
             <div class="job-output">
               {% if job.status == 'completed' %}

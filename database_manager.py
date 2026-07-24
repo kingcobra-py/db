@@ -271,7 +271,7 @@ class DatabaseManager:
         with self.connect() as db:
             rows = list(db.execute(
                 """SELECT id, progress_stage, input_files_json, source_link
-                   FROM jobs WHERE status='pending' AND source='channel-link'
+                   FROM jobs WHERE status IN ('pending','running') AND source='channel-link'
                    ORDER BY id ASC"""
             ))
         queued = 0
@@ -334,12 +334,13 @@ class DatabaseManager:
                 (stage,int(done),int(total),filename,int(index),int(count),job_id))
 
     def mark_fetching_if_pending(self, job_id: int) -> bool:
-        """Atomically move a pending download to fetching before its task starts."""
+        """Atomically move a queued job to Running/Fetching before download starts."""
         with self.connect() as db:
             cursor = db.execute(
-                """UPDATE jobs SET progress_stage='fetching', progress_done=0,
+                """UPDATE jobs SET status='running', progress_stage='fetching', progress_done=0,
                     progress_total=0, progress_file='resolving message',
-                    progress_index=0, progress_count=0, updated_at=CURRENT_TIMESTAMP
+                    progress_index=0, progress_count=0, started_at=CURRENT_TIMESTAMP,
+                    error=NULL, updated_at=CURRENT_TIMESTAMP
                     WHERE id=? AND status='pending'""",
                 (job_id,),
             )
@@ -372,7 +373,7 @@ class DatabaseManager:
 
     def recent(self,limit=25):
         with self.connect() as db:
-            rows=db.execute("SELECT id,message_id,status,source,source_link,output_text,summary_json,error,created_at,updated_at FROM jobs ORDER BY id DESC LIMIT ?",(limit,)).fetchall()
+            rows=db.execute("SELECT id,message_id,status,progress_stage,source,source_link,output_text,summary_json,error,created_at,updated_at FROM jobs ORDER BY id DESC LIMIT ?",(limit,)).fetchall()
             return [dict(r) for r in rows]
 
     def output_for_job(self,job_id,kind):
