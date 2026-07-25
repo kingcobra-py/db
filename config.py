@@ -61,6 +61,8 @@ class Settings:
     @property
     def password_store_path(self): return self.data_root / "archive-passwords.enc"
     @property
+    def session_store_path(self): return self.data_root / "telegram-sessions.enc"
+    @property
     def session_file_path(self): return self.data_root / "telegram_session.txt"
     @property
     def session_lock_path(self): return self.data_root / "telegram_session.lock"

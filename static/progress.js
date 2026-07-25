@@ -106,6 +106,66 @@
     );
   }
 
+  function sessionMeta(session) {
+    var bits = [];
+    if (session.username) bits.push("@" + session.username);
+    bits.push(session.online ? "Online" : "Offline");
+    if (session.active_jobs) bits.push(session.active_jobs + " active");
+    if (session.last_error) bits.push(session.last_error);
+    return bits.join(" · ");
+  }
+
+  function updateSessions(sessions) {
+    var chips = document.querySelector("[data-session-chips]");
+    var list = document.querySelector("[data-session-list]");
+    if (!chips && !list) return;
+
+    if (chips) {
+      if (!sessions.length) {
+        chips.innerHTML =
+          '<span class="session-chip is-empty"><i class="session-dot is-offline" aria-hidden="true"></i><span class="session-name">No sessions</span></span>';
+      } else {
+        chips.innerHTML = sessions
+          .map(function (session) {
+            var title = session.last_error
+              ? session.last_error
+              : session.online
+                ? "Online"
+                : "Offline";
+            var cls = session.online ? "is-online" : "is-offline";
+            var name = session.display_name || session.label || "Account";
+            return (
+              '<span class="session-chip" data-session-id="' +
+              String(session.id || "") +
+              '" title="' +
+              String(title).replace(/"/g, "&quot;") +
+              '"><i class="session-dot ' +
+              cls +
+              '" aria-hidden="true"></i><span class="session-name">' +
+              String(name).replace(/</g, "&lt;") +
+              "</span></span>"
+            );
+          })
+          .join("");
+      }
+    }
+
+    if (!list) return;
+    sessions.forEach(function (session) {
+      var row = list.querySelector('[data-session-id="' + session.id + '"]');
+      if (!row) return;
+      var dot = row.querySelector(".session-dot");
+      var name = row.querySelector("[data-session-name]");
+      var small = row.querySelector("small");
+      if (dot) {
+        dot.classList.toggle("is-online", !!session.online);
+        dot.classList.toggle("is-offline", !session.online);
+      }
+      if (name) name.textContent = session.display_name || session.label || "Account";
+      if (small) small.textContent = sessionMeta(session);
+    });
+  }
+
   function pulse() {
     return fetch("/dashboard/pulse", {
       credentials: "same-origin",
@@ -117,6 +177,7 @@
       })
       .then(function (data) {
         updateStatCards(data.stats);
+        updateSessions(data.sessions || []);
         var terminalChange = false;
         (data.jobs || []).forEach(function (job) {
           var row = rowById(job.id);

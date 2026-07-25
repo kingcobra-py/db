@@ -8,7 +8,6 @@ import logging
 import secrets
 import time
 import os
-import aiohttp
 from pathlib import Path
 from urllib.parse import quote_plus
 from typing import Any
@@ -206,6 +205,9 @@ class Dashboard:
                 asyncio.to_thread(self.db.get_extraction_workers, self.s.extraction_workers),
                 asyncio.to_thread(self.db.ingest_status),
             )
+            sessions = []
+            if self.pipeline is not None and hasattr(self.pipeline, 'session_status'):
+                sessions = self.pipeline.session_status()
             return self.templates.TemplateResponse(
                 request=request,
                 name='dashboard.html',
@@ -213,6 +215,7 @@ class Dashboard:
                     'stats': stats,
                     'jobs': jobs,
                     'passwords': passwords,
+                    'sessions': sessions,
                     'csrf': self._csrf(request),
                     'notice': notice,
                     'error': error,
@@ -233,7 +236,50 @@ class Dashboard:
                 asyncio.to_thread(self.db.stats),
                 asyncio.to_thread(self.db.live_jobs, 40),
             )
-            return {'stats': stats, 'jobs': live}
+            sessions = []
+            if self.pipeline is not None and hasattr(self.pipeline, 'session_status'):
+                sessions = self.pipeline.session_status()
+            return {'stats': stats, 'jobs': live, 'sessions': sessions}
+
+        @self.app.get('/sessions')
+        async def list_sessions(request: Request):
+            self._require(request)
+            if self.pipeline is None or not hasattr(self.pipeline, 'session_status'):
+                return []
+            return self.pipeline.session_status()
+
+        @self.app.post('/sessions')
+        async def add_session(
+            request: Request,
+            session_string: str = Form(...),
+            label: str = Form(''),
+            csrf: str = Form(...),
+        ):
+            self._require_post(request, csrf)
+            try:
+                result = await self.pipeline.add_session(session_string, label)
+            except ValueError as exc:
+                return RedirectResponse(f'/?error={quote_plus(str(exc))}', 303)
+            except Exception as exc:
+                LOG.exception('Failed to add Telegram session', extra={'stage': 'session'})
+                return RedirectResponse(f'/?error={quote_plus(f"Add session failed: {exc}")}', 303)
+            name = result.get('display_name') or result.get('label') or 'account'
+            return RedirectResponse(
+                f'/?notice={quote_plus(f"Added Telegram session: {name}")}',
+                303,
+            )
+
+        @self.app.post('/sessions/{session_id}/delete')
+        async def delete_session(session_id: str, request: Request, csrf: str = Form(...)):
+            self._require_post(request, csrf)
+            try:
+                await self.pipeline.remove_session(session_id)
+            except ValueError as exc:
+                return RedirectResponse(f'/?error={quote_plus(str(exc))}', 303)
+            except Exception as exc:
+                LOG.exception('Failed to remove Telegram session', extra={'stage': 'session'})
+                return RedirectResponse(f'/?error={quote_plus(f"Remove session failed: {exc}")}', 303)
+            return RedirectResponse('/?notice=Telegram+session+removed', 303)
 
         @self.app.get('/storage-info')
         async def storage_info(request: Request):
@@ -480,50 +526,22 @@ class Dashboard:
                     raise RuntimeError('Sign-in did not complete')
 
                 new_session = temp_client.session.save()
-                # Persist where the pipeline actually loads from on restart.
-                await asyncio.to_thread(self.pipeline._persist_session_string, new_session)
-
+                me = await temp_client.get_me()
+                label = me.first_name or (f'@{me.username}' if me.username else 'New account')
                 await temp_client.disconnect()
                 request.session.pop('phone_hash', None)
                 request.session.pop('phone_number', None)
 
-                # AUTO-REDEPLOY (optional)
+                # Hot-add into the multi-account pool (also mirrors legacy single-session path).
                 try:
-                    api_token = os.getenv('RAILWAY_API_TOKEN')
-                    service_id = os.getenv('RAILWAY_SERVICE_ID', '').strip()
+                    await self.pipeline.add_session(new_session, label)
+                except ValueError as exc:
+                    # Duplicate account: still refresh the legacy bootstrap file.
+                    await asyncio.to_thread(self.pipeline._persist_session_string, new_session)
+                    return RedirectResponse(f'/?error={quote_plus(str(exc))}', 303)
 
-                    if api_token and service_id:
-                        async with aiohttp.ClientSession() as session:
-                            headers = {'Authorization': f'Bearer {api_token}'}
-                            mutation = f"""
-                            mutation {{
-                              deploymentTrigger(input: {{
-                                serviceId: "{service_id}"
-                              }}) {{
-                                deployment {{
-                                  id
-                                }}
-                              }}
-                            }}
-                            """
-
-                            async with session.post(
-                                'https://api.railway.app/graphql',
-                                json={'query': mutation},
-                                headers=headers,
-                                timeout=aiohttp.ClientTimeout(total=10)
-                            ) as resp:
-                                if resp.status == 200:
-                                    LOG.info('Redeploy triggered', extra={'stage': 'session'})
-                                else:
-                                    LOG.error(f'Redeploy failed: {resp.status}', extra={'stage': 'session'})
-                    elif api_token and not service_id:
-                        LOG.warning('RAILWAY_API_TOKEN set but RAILWAY_SERVICE_ID missing; skip redeploy', extra={'stage': 'session'})
-                except Exception as e:
-                    LOG.error(f'Redeploy error: {e}', extra={'stage': 'session'})
-
-                LOG.info('Telegram session regenerated', extra={'stage': 'session'})
-                notice = 'Session updated. Restart or redeploy the service to apply it.'
+                LOG.info('Telegram session added to pool', extra={'stage': 'session'})
+                notice = f'Added Telegram account: {label}'
                 return RedirectResponse(f'/?notice={quote_plus(notice)}', 303)
 
             except CodeInvalidError:

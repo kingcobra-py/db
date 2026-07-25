@@ -21,6 +21,7 @@ from database_manager import DatabaseManager, Job
 from extractor import ArchiveProcessor
 from parse_credentials import scan_tree, write_results, extract_raw_credentials
 from password_store import PasswordStore
+from session_store import SessionStore
 from secure_logging import configure_logging
 from webapp import Dashboard
 
@@ -29,6 +30,20 @@ LOG=logging.getLogger('pipeline')
 @dataclass(frozen=True,slots=True)
 class QueueItem: job_id:int
 
+@dataclass(slots=True)
+class LiveSession:
+    id: str
+    label: str
+    session_string: str
+    client: TelegramClient
+    online: bool = False
+    user_id: int | None = None
+    username: str | None = None
+    first_name: str | None = None
+    phone: str | None = None
+    active_jobs: int = 0
+    last_error: str | None = None
+
 class Pipeline:
     def __init__(self,s:Settings):
         self.s=s
@@ -36,18 +51,25 @@ class Pipeline:
         self.queue:asyncio.Queue[QueueItem]=asyncio.Queue(maxsize=100)
         self._lock_file=None
         self._acquire_session_lock()
-        self.client=TelegramClient(StringSession(self._load_session_string()),s.api_id,s.api_hash)
+        self.session_store=SessionStore(s.session_store_path,s.password_encryption_key)
+        # Seed pool from env/legacy single-session sources on first boot.
+        bootstrap=self._load_session_string()
+        self.session_store.seed_if_empty(bootstrap, label='Primary')
+        self.sessions:dict[str,LiveSession]={}
+        self.client:TelegramClient|None=None  # primary (first online) client
         self.passwords=PasswordStore(s.password_store_path,s.password_encryption_key)
         self.extractor=ArchiveProcessor(s,self.passwords.list_plain)
         workers=max(1, min(24, self.db.get_extraction_workers(s.extraction_workers)))
         self.semaphore=asyncio.Semaphore(workers)
         self.ingest_workers=max(1, min(16, s.ingest_workers))
         self._stop_requested=asyncio.Event()
+        self._shutdown=asyncio.Event()
         self._ingest_tasks:dict[int,asyncio.Task]={}
         self._ingest_supervisor_task:asyncio.Task|None=None
         self._active_tasks:set[asyncio.Task]=set()
         self._stop_generation=0
         self._ingest_worker_heartbeat=0.0
+        self._session_rr=0
 
     def set_extraction_workers(self, workers: int) -> None:
         workers = max(1, min(24, int(workers)))
@@ -102,12 +124,213 @@ class Pipeline:
 
     def _persist_session_string(self, session_string: str | None = None)->None:
         try:
-            session_string=session_string or self.client.session.save()
+            if session_string is None:
+                if self.client is None:
+                    return
+                session_string=self.client.session.save()
             self.s.session_file_path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
             self.s.session_file_path.write_text(session_string,encoding='utf-8')
             self.db.store_config('TELEGRAM_STRING_SESSION', session_string)
         except Exception:
             LOG.exception('Failed to persist Telegram session file',extra={'stage':'startup'})
+
+    def session_status(self) -> list[dict]:
+        """Dashboard-safe live status for all Telegram accounts."""
+        rows = []
+        for item in self.session_store.public_list():
+            live = self.sessions.get(str(item['id']))
+            display = item.get('first_name') or item.get('username') or item.get('label') or 'Account'
+            if item.get('username') and item.get('first_name'):
+                display = f"{item['first_name']} (@{item['username']})"
+            elif item.get('username'):
+                display = f"@{item['username']}"
+            rows.append({
+                **item,
+                'online': bool(live and live.online),
+                'active_jobs': int(live.active_jobs) if live else 0,
+                'last_error': live.last_error if live else None,
+                'display_name': display,
+            })
+        return rows
+
+    def _pick_session(self) -> LiveSession | None:
+        online = [s for s in self.sessions.values() if s.online]
+        if not online:
+            return None
+        # Prefer least busy; round-robin tie-break keeps accounts warm.
+        online.sort(key=lambda s: (s.active_jobs, s.id))
+        self._session_rr = (self._session_rr + 1) % len(online)
+        # Rotate the least-busy set slightly so one account is not always first.
+        chosen = online[self._session_rr % len(online)]
+        least = online[0]
+        return least if least.active_jobs < chosen.active_jobs else chosen
+
+    def _set_primary_client(self) -> None:
+        for session in self.sessions.values():
+            if session.online:
+                self.client = session.client
+                return
+        # Fall back to any connected client object if present.
+        for session in self.sessions.values():
+            self.client = session.client
+            return
+
+    async def _connect_session(self, record: dict) -> LiveSession:
+        session_id = str(record['id'])
+        client = TelegramClient(
+            StringSession(record['session_string']),
+            self.s.api_id,
+            self.s.api_hash,
+        )
+        live = LiveSession(
+            id=session_id,
+            label=str(record.get('label') or 'Account'),
+            session_string=str(record['session_string']),
+            client=client,
+            user_id=record.get('user_id'),
+            username=record.get('username'),
+            first_name=record.get('first_name'),
+            phone=record.get('phone'),
+        )
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                live.online = False
+                live.last_error = 'Session is not authorized'
+                await client.disconnect()
+                return live
+            me = await client.get_me()
+            live.online = True
+            live.user_id = int(me.id)
+            live.username = me.username
+            live.first_name = me.first_name
+            live.phone = me.phone
+            live.last_error = None
+            await asyncio.to_thread(
+                self.session_store.update_profile,
+                session_id,
+                user_id=live.user_id,
+                username=live.username,
+                first_name=live.first_name,
+                phone=live.phone,
+            )
+            LOG.info(
+                'Telegram session online: %s (%s)',
+                live.first_name or live.label,
+                f'@{live.username}' if live.username else live.user_id,
+                extra={'stage': 'session', 'session_id': session_id},
+            )
+        except AuthKeyDuplicatedError:
+            live.online = False
+            live.last_error = 'Session revoked (used elsewhere)'
+            LOG.error('Session %s revoked due to duplicate use', session_id, extra={'stage': 'session'})
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        except Exception as exc:
+            live.online = False
+            live.last_error = f'{type(exc).__name__}: {exc}'
+            LOG.exception('Failed to connect session %s', session_id, extra={'stage': 'session'})
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        return live
+
+    async def start_sessions(self) -> None:
+        records = self.session_store.list_raw()
+        if not records:
+            raise RuntimeError('No Telegram sessions configured')
+        connected: dict[str, LiveSession] = {}
+        for record in records:
+            if not record.get('enabled', True):
+                continue
+            live = await self._connect_session(record)
+            connected[live.id] = live
+        self.sessions = connected
+        self._set_primary_client()
+        online = sum(1 for s in self.sessions.values() if s.online)
+        if online == 0:
+            raise RuntimeError('No Telegram sessions could come online')
+        LOG.info('Telegram session pool ready: %s online / %s total', online, len(self.sessions), extra={'stage': 'startup'})
+
+    async def add_session(self, session_string: str, label: str = '') -> dict:
+        """Validate, store, and hot-connect a new account session."""
+        client = TelegramClient(StringSession(session_string.strip()), self.s.api_id, self.s.api_hash)
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                raise ValueError('Session string is not authorized')
+            me = await client.get_me()
+            entry = await asyncio.to_thread(
+                self.session_store.add,
+                session_string,
+                label,
+                user_id=int(me.id),
+                username=me.username,
+                first_name=me.first_name,
+                phone=me.phone,
+            )
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        live = await self._connect_session(entry)
+        self.sessions[live.id] = live
+        self._set_primary_client()
+        # Keep legacy single-session file in sync with the newest online account.
+        if live.online:
+            self._persist_session_string(live.session_string)
+        self.kick_ingest()
+        return {
+            'id': live.id,
+            'online': live.online,
+            'display_name': live.first_name or live.username or live.label,
+            'username': live.username,
+            'first_name': live.first_name,
+            'user_id': live.user_id,
+            'last_error': live.last_error,
+        }
+
+    async def remove_session(self, session_id: str) -> None:
+        online_ids = [sid for sid, s in self.sessions.items() if s.online]
+        if len(online_ids) <= 1 and session_id in online_ids:
+            raise ValueError('Cannot remove the last online Telegram session')
+        live = self.sessions.get(session_id)
+        if live and live.active_jobs > 0:
+            raise ValueError('Session is busy with active downloads; stop jobs first')
+        await asyncio.to_thread(self.session_store.delete, session_id)
+        if live:
+            try:
+                await live.client.disconnect()
+            except Exception:
+                pass
+            self.sessions.pop(session_id, None)
+        self._set_primary_client()
+        self.kick_ingest()
+
+    async def refresh_session_statuses(self) -> list[dict]:
+        for live in list(self.sessions.values()):
+            try:
+                if not live.client.is_connected():
+                    await live.client.connect()
+                authorized = await live.client.is_user_authorized()
+                live.online = bool(authorized)
+                if authorized and not live.user_id:
+                    me = await live.client.get_me()
+                    live.user_id = int(me.id)
+                    live.username = me.username
+                    live.first_name = me.first_name
+                    live.phone = me.phone
+                if authorized:
+                    live.last_error = None
+            except Exception as exc:
+                live.online = False
+                live.last_error = f'{type(exc).__name__}: {exc}'
+        self._set_primary_client()
+        return self.session_status()
 
     @staticmethod
     def validate_channel_link(url:str)->tuple[str,int]:
@@ -129,7 +352,7 @@ class Pipeline:
         return int.from_bytes(digest,'big') & ((1<<63)-1)
 
     async def notify(self,chat_id:int,text:str,reply_to:int|None=None):
-        if not chat_id: return None
+        if not chat_id or self.client is None: return None
         try: return await self.client.send_message(chat_id,text,reply_to=reply_to)
         except Exception: LOG.exception('Progress notification failed',extra={'message_id':reply_to,'stage':'notification'}); return None
 
@@ -323,6 +546,8 @@ class Pipeline:
         available = self.ingest_workers - len(self._ingest_tasks)
         if available <= 0:
             return
+        if not any(s.online for s in self.sessions.values()):
+            return
         pending = await asyncio.to_thread(self.db.pending_channel_downloads)
         pending = [item for item in pending if item['job_id'] not in self._ingest_tasks]
         if not pending:
@@ -330,13 +555,16 @@ class Pipeline:
         started = pending[:available]
         started_count = 0
         for item in started:
+            session = self._pick_session()
+            if session is None:
+                break
             claimed = await asyncio.to_thread(
                 self.db.mark_fetching_if_pending, item['job_id']
             )
             if not claimed:
                 continue
             task = asyncio.create_task(
-                self._run_ingest_job(item['job_id'], item['job_key'], item['url']),
+                self._run_ingest_job(item['job_id'], item['job_key'], item['url'], session.id),
                 name=f"ingest-job-{item['job_id']}",
             )
             self._ingest_tasks[item['job_id']] = task
@@ -345,9 +573,10 @@ class Pipeline:
                 lambda completed, jid=item['job_id']: self._ingest_done(jid, completed)
             )
         LOG.info(
-            'Ingest supervisor started %s job(s): active=%s/%s queued=%s',
+            'Ingest supervisor started %s job(s): active=%s/%s queued=%s sessions_online=%s',
             started_count, len(self._ingest_tasks), self.ingest_workers,
             max(0, len(pending) - started_count),
+            sum(1 for s in self.sessions.values() if s.online),
             extra={'stage': 'web-ingest'},
         )
 
@@ -365,24 +594,43 @@ class Pipeline:
                 )
         self.kick_ingest()
 
-    async def _run_ingest_job(self, job_id:int, job_key:int, url:str) -> None:
-        """Fetch and download one job; supervisor limits total active task count."""
+    async def _run_ingest_job(self, job_id:int, job_key:int, url:str, session_id:str) -> None:
+        """Fetch and download one job on a specific Telegram account."""
         if self._stop_requested.is_set():
+            return
+        live = self.sessions.get(session_id)
+        if live is None or not live.online:
+            # Session disappeared; leave job pending for another account.
+            await asyncio.to_thread(
+                self.db.update_progress, job_id, 'queued', 0, 0, 'waiting', 0, 0
+            )
             return
         current = await asyncio.to_thread(self.db.get_job, job_id)
         if not current or current.status not in {'pending','running'} or current.input_files:
             return
+        live.active_jobs += 1
         LOG.info(
-            'Parallel ingest job started',
-            extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest'},
+            'Parallel ingest job started on %s',
+            live.first_name or live.label,
+            extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest', 'session_id': session_id},
         )
-        # Telegram downloads may legitimately take much longer than five minutes.
-        # Cancellation remains available through Stop active and service shutdown.
-        await self.ingest_channel_link(url, job_id, job_key)
-        await asyncio.sleep(0.75)
+        try:
+            await self.ingest_channel_link(url, job_id, job_key, client=live.client)
+            await asyncio.sleep(0.75)
+        finally:
+            live.active_jobs = max(0, live.active_jobs - 1)
 
-    async def ingest_channel_link(self,url:str, job_id:int|None=None, job_key:int|None=None):
+    async def ingest_channel_link(
+        self,
+        url: str,
+        job_id: int | None = None,
+        job_key: int | None = None,
+        client: TelegramClient | None = None,
+    ):
         job_key = job_key if job_key is not None else self.web_job_id(url)
+        client = client or self.client
+        if client is None:
+            raise RuntimeError('No Telegram client available')
         if job_id is None:
             job_id = await asyncio.to_thread(self.db.create_job, job_key, 0, 0, [], 'channel-link', url)
             await asyncio.to_thread(self.db.update_progress, job_id, 'fetching', 0, 0, 'resolving message', 0, 0)
@@ -394,15 +642,15 @@ class Pipeline:
             LOG.info('Starting channel ingest', extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest'})
             target,message_id=self.validate_channel_link(url)
             if target.startswith('c:'):
-                entity = await self.client.get_entity(PeerChannel(int(target[2:])))
+                entity = await client.get_entity(PeerChannel(int(target[2:])))
             else:
-                entity = await self.client.get_entity(target)
-            message = await self.client.get_messages(entity, ids=message_id)
+                entity = await client.get_entity(target)
+            message = await client.get_messages(entity, ids=message_id)
             if not message: raise ValueError('Message is unavailable to the signed-in Telegram account')
             messages=[message]
             if message.grouped_id:
                 # Pull a wider nearby window so large albums are not truncated.
-                nearby = await self.client.get_messages(entity, limit=100, offset_id=message_id + 50)
+                nearby = await client.get_messages(entity, limit=100, offset_id=message_id + 50)
                 messages=sorted({m.id:m for m in [message,*nearby] if m and m.grouped_id==message.grouped_id and m.media}.values(),key=lambda m:m.id)
             await asyncio.to_thread(
                 self.db.update_progress, job_id, 'downloading', 0, 0,
@@ -446,6 +694,9 @@ class Pipeline:
                 await asyncio.sleep(2.0)
 
     def register(self):
+        if self.client is None:
+            raise RuntimeError('No online Telegram session available for event handlers')
+
         @self.client.on(events.Album)
         async def album(event):
             uid=int(event.sender_id or 0)
@@ -511,7 +762,8 @@ class Pipeline:
                     f"✅ Credentials file ready to download"
                 )
                 await self.notify(job.chat_id,creds_msg,job.message_id)
-                await self.client.send_file(job.chat_id,str(creds_file),caption=creds_msg,reply_to=job.message_id)
+                if self.client is not None:
+                    await self.client.send_file(job.chat_id,str(creds_file),caption=creds_msg,reply_to=job.message_id)
                 LOG.info('Credentials extracted and sent',extra={'job_id':job.id,'message_id':job.message_id,'creds_count':len(raw_creds),'files_with_creds':unique_files,'stage':'processing'})
             else:
                 if job.chat_id:
@@ -519,7 +771,7 @@ class Pipeline:
                 LOG.info('No raw credentials found',extra={'job_id':job.id,'message_id':job.message_id,'stage':'processing'})
             
             # Send redacted reports
-            if job.chat_id:
+            if job.chat_id and self.client is not None:
                 await self.client.send_file(job.chat_id,str(text),caption=f"📄 Redacted Report (Files: {summary['files_scanned']}, Findings: {summary['findings']})",reply_to=job.message_id)
                 await self.client.send_file(job.chat_id,str(summary_json),caption='📊 Machine-readable summary (JSON)',reply_to=job.message_id)
                 
@@ -579,38 +831,81 @@ class Pipeline:
         LOG.info('Stop-all requested', extra={'stage': 'control', 'stopped': count})
         return count
 
+    async def _session_watch_loop(self):
+        while not self._shutdown.is_set():
+            try:
+                await self.refresh_session_statuses()
+            except Exception:
+                LOG.exception('Session watch failed', extra={'stage': 'session'})
+            try:
+                await asyncio.wait_for(self._shutdown.wait(), timeout=20)
+            except asyncio.TimeoutError:
+                pass
+
+    async def request_shutdown(self) -> None:
+        self._shutdown.set()
+        for live in list(self.sessions.values()):
+            try:
+                await live.client.disconnect()
+            except Exception:
+                pass
+
     async def run(self):
-        await asyncio.to_thread(self.db.initialize); self.register()
+        await asyncio.to_thread(self.db.initialize)
         try:
-            await self.client.start()
+            await self.start_sessions()
         except AuthKeyDuplicatedError:
-            LOG.error('Session was used from another instance simultaneously; removing local session file so it regenerates on restart',extra={'stage':'startup'})
-            try: self.s.session_file_path.unlink(missing_ok=True)
-            except OSError: pass
+            LOG.error(
+                'A Telegram session was used from another instance simultaneously; '
+                'remove the revoked account from the dashboard and add a fresh string session',
+                extra={'stage': 'startup'},
+            )
             raise
-        self._persist_session_string()
+        self.register()
+        if self.client is not None:
+            try:
+                self._persist_session_string(self.client.session.save())
+            except Exception:
+                LOG.exception('Failed to mirror primary session to legacy path', extra={'stage': 'startup'})
         _, extract_jobs = await asyncio.to_thread(self.db.restore_interrupted_work)
         queued = await asyncio.to_thread(self.db.count_queued_channel_downloads)
         for job in extract_jobs:
             await self.queue.put(QueueItem(job.id))
         LOG.info(
-            'Restored interrupted work: %s queued download(s), %s extraction(s)',
+            'Restored interrupted work: %s queued download(s), %s extraction(s); sessions online=%s/%s',
             queued, len(extract_jobs),
+            sum(1 for s in self.sessions.values() if s.online),
+            len(self.sessions),
             extra={'stage': 'startup'},
         )
         dashboard=Dashboard(self.s,self.db,self.passwords,self)
         server=uvicorn.Server(uvicorn.Config(dashboard.app,host=self.s.host,port=self.s.port,log_config=None,access_log=False))
         worker=asyncio.create_task(self.worker(),name='job-dispatcher')
         ingest=asyncio.create_task(self.ingest_supervisor(),name='channel-ingest-supervisor')
+        watch=asyncio.create_task(self._session_watch_loop(),name='session-watch')
         web=asyncio.create_task(server.serve(),name='web-dashboard')
         self.kick_ingest()
         LOG.info('Telegram scanner and web dashboard started', extra={'stage': 'startup'})
-        try: await self.client.run_until_disconnected()
+        try:
+            while not self._shutdown.is_set():
+                online = [
+                    s for s in self.sessions.values()
+                    if s.online and s.client.is_connected()
+                ]
+                if self.sessions and not online:
+                    LOG.warning('All Telegram sessions disconnected', extra={'stage': 'session'})
+                    break
+                await asyncio.sleep(1)
         finally:
+            self._shutdown.set()
             server.should_exit=True
-            worker.cancel(); ingest.cancel()
-            await asyncio.gather(worker,ingest,web,return_exceptions=True)
-            await self.client.disconnect()
+            worker.cancel(); ingest.cancel(); watch.cancel()
+            await asyncio.gather(worker,ingest,watch,web,return_exceptions=True)
+            for live in list(self.sessions.values()):
+                try:
+                    await live.client.disconnect()
+                except Exception:
+                    pass
             self._release_session_lock()
 
 async def main():
@@ -620,7 +915,7 @@ async def main():
     loop = asyncio.get_running_loop()
 
     def request_shutdown() -> None:
-        loop.call_soon_threadsafe(lambda: asyncio.ensure_future(pipeline.client.disconnect()))
+        loop.call_soon_threadsafe(lambda: asyncio.ensure_future(pipeline.request_shutdown()))
 
     if os.name == "nt":
         # ProactorEventLoop has no add_signal_handler; fall back to signal.signal.
