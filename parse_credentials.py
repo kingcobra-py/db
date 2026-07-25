@@ -42,13 +42,25 @@ def _over_size_limit(size: int, max_file_bytes: int) -> bool:
     """Return True when a positive size cap is set and the file exceeds it. 0 = unlimited."""
     return max_file_bytes > 0 and size > max_file_bytes
 
-def _should_scan_file(path: Path, output_dir: Path | None = None) -> bool:
-    if not path.is_file():
+def _is_aws_credentials_target(path: Path) -> bool:
+    """Only AWS credentials files under Soft/Azure or Applications/Azure trees."""
+    if not path.is_file() or path.name.lower() != "credentials":
         return False
-    valid_extensions = {'.txt', '.csv', '.log', '.conf', '.json', '.yaml', '.yml', ''}
-    file_ext = path.suffix.lower()
-    file_name = path.name.lower()
-    if file_ext not in valid_extensions and file_name != 'credentials':
+    parent_lower = str(path.parent).lower()
+    # Old pattern: .../Soft/.../Azure/.../aws/.../credentials
+    pola_lama = "soft" in parent_lower and "azure" in parent_lower and "aws" in parent_lower
+    # New: .../Applications/.../Azure/.../.aws/.../credentials
+    pola_baru_1 = (
+        "applications" in parent_lower
+        and "azure" in parent_lower
+        and ".aws" in parent_lower
+    )
+    # New: .../Applications/.../Azure/.../credentials
+    pola_baru_2 = "applications" in parent_lower and "azure" in parent_lower
+    return pola_lama or pola_baru_1 or pola_baru_2
+
+def _should_scan_file(path: Path, output_dir: Path | None = None) -> bool:
+    if not _is_aws_credentials_target(path):
         return False
     if output_dir is not None:
         try:
@@ -58,14 +70,24 @@ def _should_scan_file(path: Path, output_dir: Path | None = None) -> bool:
             pass
     return True
 
-def _count_scannable_files(root: Path, max_file_bytes: int, output_dir: Path | None = None) -> int:
-    count = 0
+def _iter_credential_files(root: Path, output_dir: Path | None = None):
+    """Yield only matching AWS credentials files (never Passwords.txt / random logs)."""
     root = root.resolve()
     try:
-        for path in root.rglob("*"):
-            if _should_scan_file(path, output_dir):
-                if not _over_size_limit(path.stat().st_size, max_file_bytes):
-                    count += 1
+        candidates = root.rglob("credentials")
+    except OSError:
+        return
+    for path in candidates:
+        if not _should_scan_file(path, output_dir):
+            continue
+        yield path
+
+def _count_scannable_files(root: Path, max_file_bytes: int, output_dir: Path | None = None) -> int:
+    count = 0
+    try:
+        for path in _iter_credential_files(root, output_dir):
+            if not _over_size_limit(path.stat().st_size, max_file_bytes):
+                count += 1
     except Exception:
         pass
     return count
@@ -113,9 +135,7 @@ def scan_tree(root: Path, max_file_bytes: int, fingerprint_key: bytes, max_worke
     debug_log(f"SCAN START: {scannable_count} files in {root.name}", "START")
 
     file_paths = []
-    for path in root.rglob("*"):
-        if not _should_scan_file(path, output_dir):
-            continue
+    for path in _iter_credential_files(root, output_dir):
         try:
             if _over_size_limit(path.stat().st_size, max_file_bytes):
                 continue
@@ -242,9 +262,7 @@ def extract_raw_credentials(
     region_counts: Dict[str, int] = {}
 
     file_paths = []
-    for path in root.rglob("*"):
-        if not _should_scan_file(path, output_dir):
-            continue
+    for path in _iter_credential_files(root, output_dir):
         try:
             if _over_size_limit(path.stat().st_size, max_file_bytes):
                 continue

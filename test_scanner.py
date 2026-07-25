@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from database_manager import DatabaseManager
 from extractor import ArchiveProcessor, validate_member, sanitize_member, ExtractionError, is_rar
-from parse_credentials import scan_tree, write_results
+from parse_credentials import scan_tree, write_results, extract_raw_credentials, _is_aws_credentials_target
 
 
 class SecurityTests(unittest.TestCase):
@@ -117,13 +117,40 @@ class SecurityTests(unittest.TestCase):
             self.assertIn("junk-nested.rar", calls)
             self.assertIn("pack.rar", calls)
 
+    @staticmethod
+    def _write_aws_credentials(root: Path, relative_dir: str, body: str) -> Path:
+        path = root.joinpath(*relative_dir.split("/")) / "credentials"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def test_aws_credentials_path_patterns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = self._write_aws_credentials(root, "host/Soft/Azure/aws", "x")
+            new_aws = self._write_aws_credentials(root, "host/Applications/Azure/.aws", "x")
+            new_plain = self._write_aws_credentials(root, "host/Applications/Azure/stealer", "x")
+            noise = root / "Chrome" / "Default" / "Passwords.txt"
+            noise.parent.mkdir(parents=True)
+            noise.write_text("aws_access_key_id=AKIAABCDEFGHIJKLMNOP\n", encoding="utf-8")
+            other = root / "random" / "credentials"
+            other.parent.mkdir(parents=True)
+            other.write_text("aws_access_key_id=AKIAABCDEFGHIJKLMNOP\n", encoding="utf-8")
+            self.assertTrue(_is_aws_credentials_target(old))
+            self.assertTrue(_is_aws_credentials_target(new_aws))
+            self.assertTrue(_is_aws_credentials_target(new_plain))
+            self.assertFalse(_is_aws_credentials_target(noise))
+            self.assertFalse(_is_aws_credentials_target(other))
+
     def test_scanner_redacts_secret(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             fake_id = "AKIAABCDEFGHIJKLMNOP"
             fake_secret = "A" * 40
-            (root / "sample.log").write_text(
-                f"aws_access_key_id={fake_id}\naws_secret_access_key={fake_secret}\n"
+            self._write_aws_credentials(
+                root,
+                "victim/Soft/Azure/aws",
+                f"aws_access_key_id={fake_id}\naws_secret_access_key={fake_secret}\n",
             )
             findings, summary = scan_tree(root, 100_000, b"test-key")
             text, js = write_results(root / "out", 123, findings, summary)
@@ -138,10 +165,12 @@ class SecurityTests(unittest.TestCase):
             fake_id = "ASIAABCDEFGHIJKLMNOP"
             fake_secret = "B" * 40
             fake_token = "C" * 120
-            (root / "creds.log").write_text(
+            self._write_aws_credentials(
+                root,
+                "victim/Applications/Azure/.aws",
                 f"aws_access_key_id={fake_id}\n"
                 f'aws_secret_access_key="{fake_secret}"\n'
-                f"aws_session_token = {fake_token}\n"
+                f"aws_session_token = {fake_token}\n",
             )
             findings, summary = scan_tree(root, 100_000, b"test-key")
             text, js = write_results(root / "out", 456, findings, summary)
@@ -157,17 +186,20 @@ class SecurityTests(unittest.TestCase):
     def test_short_token_not_matched(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "short.log").write_text("aws_session_token=" + "D" * 40 + "\n")
+            self._write_aws_credentials(
+                root,
+                "victim/Applications/Azure/.aws",
+                "aws_session_token=" + "D" * 40 + "\n",
+            )
             findings, summary = scan_tree(root, 100_000, b"test-key")
             self.assertEqual(summary["by_type"]["aws_session_token"], 0)
 
     def test_large_file_scanned_when_unlimited(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            huge = root / "dump.txt"
             # Build a file larger than a tiny cap would allow; max_file_bytes=0 must not skip it.
             payload = "aws_access_key_id=AKIAABCDEFGHIJKLMNOP\naws_secret_access_key=" + ("A" * 40) + "\n"
-            huge.write_text(payload * 1000, encoding="utf-8")
+            self._write_aws_credentials(root, "victim/Soft/Azure/aws", payload * 1000)
             findings, summary = scan_tree(root, 0, b"test-key")
             self.assertEqual(summary["files_scanned"], 1)
             self.assertEqual(summary["findings"], 2000)
@@ -176,35 +208,44 @@ class SecurityTests(unittest.TestCase):
     def test_large_file_skipped_when_capped(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            huge = root / "dump.txt"
-            huge.write_text("aws_access_key_id=AKIAABCDEFGHIJKLMNOP\n" + ("x" * 5000), encoding="utf-8")
+            self._write_aws_credentials(
+                root,
+                "victim/Soft/Azure/aws",
+                "aws_access_key_id=AKIAABCDEFGHIJKLMNOP\n" + ("x" * 5000),
+            )
             findings, summary = scan_tree(root, 100, b"test-key")
             self.assertEqual(summary["files_scanned"], 0)
             self.assertEqual(summary["findings"], 0)
 
     def test_extract_raw_respects_unlimited_size(self):
-        from parse_credentials import extract_raw_credentials
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            path = root / "creds.txt"
-            path.write_text(
+            self._write_aws_credentials(
+                root,
+                "victim/Applications/Azure/.aws",
                 "aws_access_key_id=AKIAABCDEFGHIJKLMNOP\n"
                 "aws_secret_access_key=" + ("Z" * 40) + "\n"
                 "region=us-east-1\n",
-                encoding="utf-8",
             )
-            # Hardcoded 1MB bug used to skip nothing here, but ensure API accepts max_file_bytes=0.
             creds = extract_raw_credentials(root, max_workers=2, max_file_bytes=0)
             self.assertEqual(len(creds), 1)
             self.assertEqual(creds[0]["access_key"], "AKIAABCDEFGHIJKLMNOP")
 
-    def test_unscanned_suffix_ignored(self):
+    def test_passwords_txt_and_other_files_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            noise = root / "Chrome" / "Default" / "Passwords.txt"
+            noise.parent.mkdir(parents=True)
+            noise.write_text(
+                "aws_access_key_id=AKIAABCDEFGHIJKLMNOP\n"
+                "aws_secret_access_key=" + ("Z" * 40) + "\n",
+                encoding="utf-8",
+            )
             (root / "notes.md").write_text("aws_access_key_id=AKIAABCDEFGHIJKLMNOP\n")
             findings, summary = scan_tree(root, 100_000, b"test-key")
             self.assertEqual(summary["files_scanned"], 0)
             self.assertEqual(summary["findings"], 0)
+            self.assertEqual(extract_raw_credentials(root, max_workers=2), [])
 
     def test_database_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
