@@ -59,6 +59,64 @@ class SecurityTests(unittest.TestCase):
             empty.mkdir()
             self.assertFalse(processor._extract_ok(result, empty))
 
+    def test_unrar_extract_ok_accepts_create_errors_with_files(self):
+        """Correct passwords must not be discarded when unrar exits 9/10 for a few paths."""
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "out"
+            destination.mkdir()
+            (destination / "passwords.txt").write_text("ok", encoding="utf-8")
+            processor = object.__new__(ArchiveProcessor)
+            ok = SimpleNamespace(returncode=9, stdout="Total errors: 2\n")
+            self.assertTrue(processor._unrar_extract_ok(ok, destination))
+            wrong = SimpleNamespace(returncode=11, stdout="Incorrect password\n")
+            self.assertFalse(processor._unrar_extract_ok(wrong, destination))
+            empty = Path(tmp) / "empty"
+            empty.mkdir()
+            self.assertFalse(processor._unrar_extract_ok(ok, empty))
+
+    def test_nested_archive_password_failure_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = SimpleNamespace(
+                data_root=root,
+                work_dir=root / "work",
+                max_nesting_depth=2,
+                max_archive_files=0,
+                max_expanded_bytes=0,
+                min_free_bytes=1,
+                extraction_timeout_seconds=30,
+            )
+            settings.work_dir.mkdir()
+            processor = object.__new__(ArchiveProcessor)
+            processor.s = settings
+            processor.password_provider = lambda: ["@LOGACTIVE"]
+            processor.unrar = "/usr/bin/unrar"
+
+            def fake_passwords(files):
+                return [None, "@LOGACTIVE"]
+
+            calls = []
+
+            def fake_extract(archive, destination, passwords):
+                calls.append(archive.name)
+                if "nested" in archive.name:
+                    raise ExtractionError(f"Could not safely extract {archive.name} with unrar: wrong password")
+                destination.mkdir(parents=True, exist_ok=True)
+                (destination / "All Passwords.txt").write_text("user:pass", encoding="utf-8")
+                nested = destination / "junk-nested.rar"
+                nested.write_bytes(b"Rar!\x00")
+
+            processor._passwords = fake_passwords
+            processor._extract = fake_extract
+            processor._post_validate = lambda work: (1, 1)
+
+            primary = root / "pack.rar"
+            primary.write_bytes(b"Rar!\x00")
+            out = processor.process(42, [primary])
+            self.assertTrue((out / "archive-0" / "All Passwords.txt").exists())
+            self.assertIn("junk-nested.rar", calls)
+            self.assertIn("pack.rar", calls)
+
     def test_scanner_redacts_secret(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

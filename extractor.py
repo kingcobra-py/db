@@ -365,6 +365,26 @@ class ArchiveProcessor:
             return True
         return False
 
+    def _unrar_extract_ok(self, result: subprocess.CompletedProcess[str], destination: Path) -> bool:
+        """Accept unrar warning/fatal exits when the archive still yielded files.
+
+        Log packs often return exit 9/10 for a few path-too-long members while
+        extracting tens of thousands of usable files. Exit 11 is wrong password
+        and must never be treated as success.
+        """
+        if result.returncode == 11:
+            return False
+        if result.returncode in (0, 1):
+            return True
+        extracted = self._count_extracted_files(destination)
+        if extracted > 0:
+            LOG.warning(
+                "Accepting partial/warning unrar extract into %s (%s file(s), unrar exit %s: %s)",
+                destination, extracted, result.returncode, self._summarize_unrar_output(result.stdout),
+            )
+            return True
+        return False
+
     def _extract_with_unrar(self, archive: Path, destination: Path, passwords: list[str | None]) -> None:
         if not self.unrar:
             raise ExtractionError(
@@ -373,6 +393,7 @@ class ArchiveProcessor:
             )
         destination.mkdir(parents=True, exist_ok=True, mode=0o700)
         last_error = "archive rejected"
+        saw_non_password_error = False
         # Rough pre-check; exact sizes enforced in _post_validate.
         self._verify_disk(max(archive.stat().st_size * 4, archive.stat().st_size))
 
@@ -388,15 +409,23 @@ class ArchiveProcessor:
                     self._unrar_password_arg(password),
                     "--", str(archive), f"{destination_temp}{os.sep}",
                 ])
-                if result.returncode in (0, 1):
+                if self._unrar_extract_ok(result, destination_temp):
                     self._post_validate(destination_temp)
                     shutil.rmtree(destination, ignore_errors=True)
                     destination_temp.rename(destination)
                     return
-                last_error = self._summarize_unrar_output(result.stdout) or f"unrar exit {result.returncode}"
+                summary = self._summarize_unrar_output(result.stdout) or f"unrar exit {result.returncode}"
                 if result.returncode == 11:
-                    last_error = "wrong password"
+                    summary = "wrong password"
+                    # Keep an earlier non-password failure as the final message when
+                    # a later wrong password would otherwise hide it.
+                    if not saw_non_password_error:
+                        last_error = summary
+                else:
+                    saw_non_password_error = True
+                    last_error = summary
             except (ExtractionError, subprocess.TimeoutExpired) as exc:
+                saw_non_password_error = True
                 last_error = str(exc) or type(exc).__name__
             finally:
                 shutil.rmtree(destination_temp, ignore_errors=True)
@@ -544,6 +573,16 @@ class ArchiveProcessor:
             if not nested: break
             for index, archive in enumerate(nested):
                 processed.add(archive.resolve())
-                self._extract(archive, archive.parent / f".nested-{depth}-{index}-{archive.stem}", passwords)
+                nested_dest = archive.parent / f".nested-{depth}-{index}-{archive.stem}"
+                try:
+                    self._extract(archive, nested_dest, passwords)
+                except ExtractionError as exc:
+                    # Nested keygens/setup packs often use unrelated passwords.
+                    # Keep the already-extracted primary payload and continue.
+                    LOG.warning(
+                        "Skipping nested archive %s: %s",
+                        archive.name, exc,
+                    )
+                    shutil.rmtree(nested_dest, ignore_errors=True)
         self._post_validate(work)
         return work
