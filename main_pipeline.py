@@ -41,7 +41,7 @@ class Pipeline:
         self.extractor=ArchiveProcessor(s,self.passwords.list_plain)
         workers=max(1, min(24, self.db.get_extraction_workers(s.extraction_workers)))
         self.semaphore=asyncio.Semaphore(workers)
-        self.ingest_workers=max(1, min(8, s.ingest_workers))
+        self.ingest_workers=max(1, min(16, s.ingest_workers))
         self._stop_requested=asyncio.Event()
         self._ingest_tasks:dict[int,asyncio.Task]={}
         self._ingest_supervisor_task:asyncio.Task|None=None

@@ -42,15 +42,31 @@ def is_non_primary(path: Path) -> bool:
     return bool(part and int(part.group(1)) != 1)
 
 
-def validate_member(name: str) -> None:
+def sanitize_member(name: str) -> str:
+    """Return a safe relative member path.
+
+    Absolute paths are rewritten into the extract root (e.g. `/dados.TXT` -> `dados.TXT`).
+    Parent-directory traversal and NUL bytes remain hard errors.
+    """
     normalized = name.replace("\\", "/").strip()
     if not normalized:
-        return
-    posix, windows = PurePosixPath(normalized), PureWindowsPath(name)
-    if posix.is_absolute() or windows.is_absolute() or windows.drive:
-        raise ExtractionError(f"Absolute archive path rejected: {name!r}")
+        raise ExtractionError(f"Empty archive path rejected: {name!r}")
+    # Strip POSIX absolute roots and Windows drive prefixes.
+    while normalized.startswith("/"):
+        normalized = normalized[1:]
+    if len(normalized) >= 2 and normalized[0].isalpha() and normalized[1] == ":":
+        normalized = normalized[2:].lstrip("/")
+    if not normalized:
+        raise ExtractionError(f"Empty archive path rejected: {name!r}")
+    posix = PurePosixPath(normalized)
     if ".." in posix.parts or "\x00" in normalized:
         raise ExtractionError(f"Unsafe archive path rejected: {name!r}")
+    return normalized
+
+
+def validate_member(name: str) -> None:
+    """Backward-compatible path check used by listing/extract validation."""
+    sanitize_member(name)
 
 
 class ArchiveProcessor:
@@ -169,18 +185,32 @@ class ArchiveProcessor:
 
     @staticmethod
     def _summarize_7z_output(output: str, limit: int = 240) -> str:
-        text = " ".join(line.strip() for line in (output or "").splitlines() if line.strip())
-        if not text:
+        lines = [line.strip() for line in (output or "").splitlines() if line.strip()]
+        if not lines:
             return "no 7z output"
+        preferred: list[str] = []
+        for line in lines:
+            lowered = line.lower()
+            if line.startswith("ERROR:") or line.startswith("ERRORS:"):
+                preferred.append(line)
+            elif "wrong password" in lowered:
+                return "wrong password"
+            elif "unsupported method" in lowered:
+                return "unsupported compression method"
+            elif "is not archive" in lowered or "can not open the file as archive" in lowered:
+                return "not a valid archive"
+            elif "headers error" in lowered:
+                preferred.append("Headers Error")
+            elif "file name too long" in lowered or "cannot open output file" in lowered:
+                preferred.append(line)
+        if preferred:
+            return " | ".join(dict.fromkeys(preferred))[:limit]
+        text = " ".join(lines)
         lowered = text.lower()
         if "wrong password" in lowered:
             return "wrong password"
         if "cannot open" in lowered and "password" in lowered:
             return "password required or incorrect"
-        if "unsupported method" in lowered:
-            return "unsupported compression method"
-        if "is not archive" in lowered or "can not open the file as archive" in lowered:
-            return "not a valid archive"
         return text[:limit]
 
     @staticmethod
@@ -212,7 +242,11 @@ class ArchiveProcessor:
         count = 0
         expanded = 0
         for entry in entries:
-            validate_member(entry.filename)
+            try:
+                sanitize_member(entry.filename)
+            except ExtractionError:
+                LOG.warning("Skipping unsafe ZIP member %r in %s", entry.filename, archive.name)
+                continue
             count += 1
             if self.s.max_archive_files > 0 and count > self.s.max_archive_files:
                 raise ExtractionError("Archive file-count limit exceeded")
@@ -225,24 +259,11 @@ class ArchiveProcessor:
             return 0, 0
         return count, expanded
 
-    def _inspect(self, archive: Path, password: str | None) -> tuple[int, int]:
-        result = self._run(["l", "-slt", "-bd", "-y", self._password_arg(password), str(archive)])
-        if result.returncode != 0:
-            if archive.name.lower().endswith(".zip"):
-                try:
-                    inspected = self._inspect_zip_native(archive)
-                    LOG.warning(
-                        "p7zip listing failed for %s; native ZIP inspection found %s entries",
-                        archive.name, inspected[0],
-                    )
-                    return inspected
-                except ExtractionError:
-                    pass
-            raise ExtractionError(f"Archive listing failed: {self._summarize_7z_output(result.stdout)}")
+    def _parse_7z_slt(self, stdout: str) -> tuple[int, int]:
         count = expanded = 0
         in_entries = False
         is_directory = False
-        for line in result.stdout.splitlines():
+        for line in (stdout or "").splitlines():
             line = line.strip()
             if line.startswith("----------"):
                 in_entries = True
@@ -250,7 +271,14 @@ class ArchiveProcessor:
             if not in_entries:
                 continue
             if line.startswith("Path = "):
-                validate_member(line[7:]); count += 1; is_directory = False
+                try:
+                    sanitize_member(line[7:])
+                except ExtractionError:
+                    LOG.warning("Skipping unsafe archive member %r", line[7:])
+                    is_directory = False
+                    continue
+                count += 1
+                is_directory = False
             elif line.startswith("Attributes = "):
                 is_directory = "D" in line[13:].strip()
             elif line.startswith("Size = ") and line[7:].strip().isdigit():
@@ -258,19 +286,34 @@ class ArchiveProcessor:
                     expanded += int(line[7:].strip())
             if self.s.max_archive_files > 0 and count > self.s.max_archive_files:
                 raise ExtractionError("Archive file-count limit exceeded")
-        if count == 0:
-            if archive.name.lower().endswith(".zip"):
+        return count, expanded
+
+    def _inspect(self, archive: Path, password: str | None) -> tuple[int, int]:
+        result = self._run(["l", "-slt", "-bd", "-y", self._password_arg(password), str(archive)])
+        parsed = self._parse_7z_slt(result.stdout)
+        if parsed[0] > 0:
+            if result.returncode not in (0, 1):
+                LOG.warning(
+                    "p7zip listing for %s exited %s with warnings (%s); using parsed entries",
+                    archive.name, result.returncode, self._summarize_7z_output(result.stdout),
+                )
+            return parsed
+        if archive.name.lower().endswith(".zip"):
+            try:
                 inspected = self._inspect_zip_native(archive)
                 LOG.warning(
-                    "p7zip listing parser found no entries for %s; native ZIP inspection found %s",
+                    "p7zip listing failed for %s; native ZIP inspection found %s entries",
                     archive.name, inspected[0],
                 )
                 return inspected
-            raise ExtractionError(
-                "Archive listing returned no recognizable entries; the archive may be empty, "
-                "incomplete, or use an unsupported listing format"
-            )
-        return count, expanded
+            except ExtractionError:
+                pass
+        if result.returncode != 0:
+            raise ExtractionError(f"Archive listing failed: {self._summarize_7z_output(result.stdout)}")
+        raise ExtractionError(
+            "Archive listing returned no recognizable entries; the archive may be empty, "
+            "incomplete, or use an unsupported listing format"
+        )
 
     def _verify_disk(self, expanded: int) -> None:
         if shutil.disk_usage(self.s.data_root).free < expanded + self.s.min_free_bytes:
@@ -299,6 +342,28 @@ class ArchiveProcessor:
                 )
                 # Do not abort — large Telegram log packs routinely exceed old 5GiB env caps.
         return count, total
+
+    def _count_extracted_files(self, root: Path) -> int:
+        if not root.exists():
+            return 0
+        return sum(1 for path in root.rglob("*") if path.is_file())
+
+    def _extract_ok(self, result: subprocess.CompletedProcess[str], destination: Path) -> bool:
+        """Treat warning exits as success when 7z still produced extractable files.
+
+        p7zip often returns code 2 for ZIP 'Headers Error' or a few 'file name too long'
+        members while still extracting tens of thousands of usable files.
+        """
+        if result.returncode == 0:
+            return True
+        extracted = self._count_extracted_files(destination)
+        if result.returncode in (1, 2) and extracted > 0:
+            LOG.warning(
+                "Accepting partial/warning extract into %s (%s file(s), 7z exit %s: %s)",
+                destination, extracted, result.returncode, self._summarize_7z_output(result.stdout),
+            )
+            return True
+        return False
 
     def _extract_with_unrar(self, archive: Path, destination: Path, passwords: list[str | None]) -> None:
         if not self.unrar:
@@ -350,9 +415,9 @@ class ArchiveProcessor:
                                f"-o{destination}",
                                self._password_arg(None),
                                str(archive)])
-            if result.returncode == 0:
+            if self._extract_ok(result, destination):
                 self._post_validate(destination)
-                return  # SUCCESS: No password needed
+                return  # SUCCESS: No password needed (or warning-only extract)
 
             last_error = self._summarize_7z_output(result.stdout) or "archive needs password"
         except (ExtractionError, subprocess.TimeoutExpired) as exc:
@@ -360,6 +425,13 @@ class ArchiveProcessor:
 
         # Second pass: archive needs password, try each one on the archive
         if len(passwords) <= 1:
+            # Keep any warning-only extract that already landed files.
+            if self._count_extracted_files(destination) > 0:
+                try:
+                    self._post_validate(destination)
+                    return
+                except ExtractionError as exc:
+                    last_error = str(exc)
             shutil.rmtree(destination, ignore_errors=True)
             raise ExtractionError(
                 f"Could not safely extract {archive.name}: {last_error} "
@@ -380,7 +452,7 @@ class ArchiveProcessor:
                                    self._password_arg(password),
                                    str(archive)])
 
-                if result.returncode == 0:
+                if self._extract_ok(result, destination_temp):
                     self._post_validate(destination_temp)
                     # Move temp to final destination
                     shutil.rmtree(destination, ignore_errors=True)

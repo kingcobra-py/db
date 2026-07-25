@@ -6,15 +6,17 @@ import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from database_manager import DatabaseManager
-from extractor import ArchiveProcessor, validate_member, ExtractionError, is_rar
+from extractor import ArchiveProcessor, validate_member, sanitize_member, ExtractionError, is_rar
 from parse_credentials import scan_tree, write_results
 
 
 class SecurityTests(unittest.TestCase):
     def test_traversal_rejected(self):
-        for value in ("../secret.txt", "/etc/passwd", "C:\\Windows\\file.txt"):
-            with self.assertRaises(ExtractionError):
-                validate_member(value)
+        with self.assertRaises(ExtractionError):
+            validate_member("../secret.txt")
+        # Absolute members are rewritten into the extract root instead of failing the archive.
+        self.assertEqual(sanitize_member("/dados.TXT"), "dados.TXT")
+        self.assertEqual(sanitize_member(r"C:\Windows\file.txt"), "Windows/file.txt")
 
     def test_is_rar_detects_rar_names(self):
         self.assertTrue(is_rar(Path("logs.rar")))
@@ -33,15 +35,29 @@ class SecurityTests(unittest.TestCase):
             self.assertEqual(count, 1)
             self.assertEqual(expanded, len("valid-data"))
 
-    def test_native_zip_fallback_rejects_traversal(self):
+    def test_native_zip_fallback_skips_traversal_members(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive = Path(tmp) / "unsafe.zip"
             with zipfile.ZipFile(archive, "w") as zipped:
                 zipped.writestr("../escape.txt", "no")
+                zipped.writestr("ok.txt", "yes")
             processor = object.__new__(ArchiveProcessor)
             processor.s = SimpleNamespace(max_archive_files=100)
-            with self.assertRaises(ExtractionError):
-                processor._inspect_zip_native(archive)
+            count, expanded = processor._inspect_zip_native(archive)
+            self.assertEqual(count, 1)
+            self.assertEqual(expanded, 3)
+
+    def test_extract_ok_accepts_headers_error_with_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "out"
+            destination.mkdir()
+            (destination / "a.txt").write_text("ok", encoding="utf-8")
+            processor = object.__new__(ArchiveProcessor)
+            result = SimpleNamespace(returncode=2, stdout="ERRORS:\nHeaders Error\n")
+            self.assertTrue(processor._extract_ok(result, destination))
+            empty = Path(tmp) / "empty"
+            empty.mkdir()
+            self.assertFalse(processor._extract_ok(result, empty))
 
     def test_scanner_redacts_secret(self):
         with tempfile.TemporaryDirectory() as tmp:
