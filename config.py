@@ -90,7 +90,7 @@ def load_settings() -> Settings:
         min_free_bytes=positive_int("MIN_FREE_BYTES", 1024**3),
         extraction_timeout_seconds=positive_int("EXTRACTION_TIMEOUT_SECONDS", 1800),
         extraction_workers=min(positive_int("EXTRACTION_WORKERS", 1), 24),
-        # Bounded to reduce Telegram flood-waits and concurrent disk pressure.
+        # Parallel Telegram downloads per online session (total = this × sessions).
         ingest_workers=min(positive_int("INGEST_WORKERS", 3), 16),
         fingerprint_key=required("FINGERPRINT_KEY").encode(),
         dashboard_password=required("DASHBOARD_PASSWORD"), dashboard_secret=required("DASHBOARD_SECRET").encode(),

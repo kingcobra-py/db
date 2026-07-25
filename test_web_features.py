@@ -77,7 +77,8 @@ class IngestSchedulingTests(unittest.IsolatedAsyncioTestCase):
         pipeline = object.__new__(Pipeline)
         pipeline.db = FakeDB()
         pipeline._stop_requested = __import__('asyncio').Event()
-        pipeline.ingest_workers = 3
+        # 2 per session × 2 online sessions => capacity 4, but only 4 pending also.
+        pipeline.ingest_workers = 2
         pipeline._ingest_tasks = {}
         pipeline._ingest_supervisor_task = None
         pipeline._ingest_worker_heartbeat = 0.0
@@ -92,16 +93,25 @@ class IngestSchedulingTests(unittest.IsolatedAsyncioTestCase):
         async def fake_run(job_id, job_key, url, session_id):
             started.append((url, job_id, job_key, session_id))
             await release.wait()
+            pipeline.sessions[session_id].active_jobs = max(
+                0, pipeline.sessions[session_id].active_jobs - 1
+            )
 
         pipeline._run_ingest_job = fake_run
         await pipeline._schedule_pending_ingests()
         for _ in range(100):
-            if len(started) == 3:
+            if len(started) == 4:
                 break
             await __import__('asyncio').sleep(0.01)
-        self.assertEqual(len(pipeline._ingest_tasks), 3)
-        self.assertEqual([item[1] for item in started], [1, 2, 3])
+        self.assertEqual(pipeline._ingest_capacity(), 4)
+        self.assertEqual(len(pipeline._ingest_tasks), 4)
+        self.assertEqual([item[1] for item in started], [1, 2, 3, 4])
         self.assertTrue(all(item[3] in {'a', 'b'} for item in started))
+        # Both sessions should be used (spread), each at most 2 reserved slots.
+        used = {item[3] for item in started}
+        self.assertEqual(used, {'a', 'b'})
+        self.assertLessEqual(pipeline.sessions['a'].active_jobs, 2)
+        self.assertLessEqual(pipeline.sessions['b'].active_jobs, 2)
         self.assertTrue(all(args[1] == 'fetching' for args in pipeline.db.progress))
         tasks = list(pipeline._ingest_tasks.values())
         release.set()

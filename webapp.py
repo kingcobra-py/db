@@ -160,11 +160,19 @@ class Dashboard:
             if self.pipeline is not None:
                 ingest = await asyncio.to_thread(self.db.ingest_status)
                 hb = getattr(self.pipeline, '_ingest_worker_heartbeat', 0.0) or 0.0
+                per_session = getattr(self.pipeline, 'ingest_workers', 1)
+                capacity = (
+                    self.pipeline._ingest_capacity()
+                    if hasattr(self.pipeline, '_ingest_capacity')
+                    else per_session
+                )
                 payload.update({
                     'ingest_queued': ingest.get('queued', 0),
                     'ingest_active': ingest.get('active'),
                     'ingest_active_count': ingest.get('active_count', 0),
-                    'ingest_workers': getattr(self.pipeline, 'ingest_workers', 1),
+                    'ingest_workers': per_session,
+                    'ingest_workers_per_session': per_session,
+                    'ingest_capacity': capacity,
                     'ingest_heartbeat_age_s': (None if not hb else round(max(0.0, time.monotonic() - hb), 2)),
                 })
             return payload

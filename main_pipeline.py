@@ -154,16 +154,24 @@ class Pipeline:
         return rows
 
     def _pick_session(self) -> LiveSession | None:
-        online = [s for s in self.sessions.values() if s.online]
+        """Pick an online session that still has per-account download capacity."""
+        online = [
+            s for s in self.sessions.values()
+            if s.online and s.active_jobs < self.ingest_workers
+        ]
         if not online:
             return None
         # Prefer least busy; round-robin tie-break keeps accounts warm.
         online.sort(key=lambda s: (s.active_jobs, s.id))
         self._session_rr = (self._session_rr + 1) % len(online)
-        # Rotate the least-busy set slightly so one account is not always first.
         chosen = online[self._session_rr % len(online)]
         least = online[0]
         return least if least.active_jobs < chosen.active_jobs else chosen
+
+    def _ingest_capacity(self) -> int:
+        """Total parallel downloads = INGEST_WORKERS × online sessions."""
+        online = sum(1 for s in self.sessions.values() if s.online)
+        return self.ingest_workers * max(0, online)
 
     def _set_primary_client(self) -> None:
         for session in self.sessions.values():
@@ -538,23 +546,23 @@ class Pipeline:
         )
 
     async def _schedule_pending_ingests(self) -> None:
-        """Start oldest pending downloads up to the configured parallel worker count."""
+        """Start pending downloads: up to INGEST_WORKERS parallel per online session."""
         self._ingest_worker_heartbeat = time.monotonic()
         for job_id, task in list(self._ingest_tasks.items()):
             if task.done():
                 self._ingest_tasks.pop(job_id, None)
-        available = self.ingest_workers - len(self._ingest_tasks)
-        if available <= 0:
-            return
-        if not any(s.online for s in self.sessions.values()):
+        capacity = self._ingest_capacity()
+        available = capacity - len(self._ingest_tasks)
+        if available <= 0 or capacity <= 0:
             return
         pending = await asyncio.to_thread(self.db.pending_channel_downloads)
         pending = [item for item in pending if item['job_id'] not in self._ingest_tasks]
         if not pending:
             return
-        started = pending[:available]
         started_count = 0
-        for item in started:
+        for item in pending:
+            if started_count >= available:
+                break
             session = self._pick_session()
             if session is None:
                 break
@@ -563,6 +571,8 @@ class Pipeline:
             )
             if not claimed:
                 continue
+            # Reserve the per-session slot immediately so the next pick spreads out.
+            session.active_jobs += 1
             task = asyncio.create_task(
                 self._run_ingest_job(item['job_id'], item['job_key'], item['url'], session.id),
                 name=f"ingest-job-{item['job_id']}",
@@ -573,8 +583,8 @@ class Pipeline:
                 lambda completed, jid=item['job_id']: self._ingest_done(jid, completed)
             )
         LOG.info(
-            'Ingest supervisor started %s job(s): active=%s/%s queued=%s sessions_online=%s',
-            started_count, len(self._ingest_tasks), self.ingest_workers,
+            'Ingest supervisor started %s job(s): active=%s/%s (per_session=%s) queued=%s sessions_online=%s',
+            started_count, len(self._ingest_tasks), capacity, self.ingest_workers,
             max(0, len(pending) - started_count),
             sum(1 for s in self.sessions.values() if s.online),
             extra={'stage': 'web-ingest'},
@@ -601,20 +611,21 @@ class Pipeline:
         live = self.sessions.get(session_id)
         if live is None or not live.online:
             # Session disappeared; leave job pending for another account.
+            if live is not None:
+                live.active_jobs = max(0, live.active_jobs - 1)
             await asyncio.to_thread(
                 self.db.update_progress, job_id, 'queued', 0, 0, 'waiting', 0, 0
             )
             return
-        current = await asyncio.to_thread(self.db.get_job, job_id)
-        if not current or current.status not in {'pending','running'} or current.input_files:
-            return
-        live.active_jobs += 1
-        LOG.info(
-            'Parallel ingest job started on %s',
-            live.first_name or live.label,
-            extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest', 'session_id': session_id},
-        )
         try:
+            current = await asyncio.to_thread(self.db.get_job, job_id)
+            if not current or current.status not in {'pending','running'} or current.input_files:
+                return
+            LOG.info(
+                'Parallel ingest job started on %s',
+                live.first_name or live.label,
+                extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest', 'session_id': session_id},
+            )
             await self.ingest_channel_link(url, job_id, job_key, client=live.client)
             await asyncio.sleep(0.75)
         finally:
