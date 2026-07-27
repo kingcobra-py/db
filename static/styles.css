@@ -450,10 +450,12 @@ td a:hover{text-decoration:underline}
 .status{display:inline-flex;align-items:center;gap:6px;border:1px solid;border-radius:999px;padding:4px 8px;font:800 9px ui-monospace,monospace;text-transform:uppercase;letter-spacing:.07em}
 .status::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;box-shadow:0 0 9px currentColor}
 .status.pending{color:var(--amber);background:var(--amber-soft);border-color:rgba(255,198,109,.2)}
+.status.downloading{color:#84a3ff;background:var(--blue-soft);border-color:rgba(95,133,255,.22)}
+.status.extracting{color:#9ad7ff;background:rgba(102,221,255,.10);border-color:rgba(102,221,255,.22)}
 .status.running{color:#84a3ff;background:var(--blue-soft);border-color:rgba(95,133,255,.22)}
 .status.completed{color:var(--green);background:var(--green-soft);border-color:rgba(99,230,165,.2)}
 .status.failed{color:var(--red);background:var(--red-soft);border-color:rgba(255,125,134,.2)}
-.status.running::before{animation:pulse 1.4s ease-in-out infinite}
+.status.downloading::before,.status.extracting::before,.status.running::before{animation:pulse 1.4s ease-in-out infinite}
 .error-text{display:block;max-width:220px;margin-top:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--red)}
 .job-output{display:grid;gap:6px}.job-output .metrics{color:var(--muted);font-size:10px}
 

@@ -140,20 +140,39 @@
                 <thead><tr><th>Job</th><th>Source</th><th>Status</th><th>Created</th><th>Output</th></tr></thead>
                 <tbody data-jobs-body>
                 {% for job in jobs %}
-                  {% set display_status = 'running' if job.status == 'running' or job.progress_stage in ['fetching', 'downloading'] else job.status %}
-                  <tr data-job-id="{{ job.id }}" data-job-status="{{ job.status }}">
+                  {% set stage = (job.progress_stage or '')|lower %}
+                  {% if job.status == 'completed' %}
+                    {% set display_status = 'completed' %}
+                    {% set display_label = 'Successful' %}
+                  {% elif job.status == 'failed' %}
+                    {% set display_status = 'failed' %}
+                    {% set display_label = 'Failed' %}
+                  {% elif stage in ['queued', 'fetching', 'downloading'] %}
+                    {% set display_status = 'downloading' %}
+                    {% set display_label = 'Downloading' %}
+                  {% elif stage in ['extracting', 'scanning'] or job.status == 'running' %}
+                    {% set display_status = 'extracting' %}
+                    {% set display_label = 'Extracting' %}
+                  {% else %}
+                    {% set display_status = 'pending' %}
+                    {% set display_label = 'Pending' %}
+                  {% endif %}
+                  <tr data-job-id="{{ job.id }}" data-job-status="{{ job.status }}" data-job-stage="{{ stage }}">
                     <td><b>#{{ job.id }}</b><small>Message {{ job.message_id }}</small></td>
                     <td>{{ job.source }}</td>
                     <td>
-                      <span class="status {{ display_status }}">{{ 'Successful' if display_status == 'completed' else display_status|capitalize }}</span>
+                      <span class="status {{ display_status }}">{{ display_label }}</span>
                       {% if job.error %}<small class="error-text" title="{{ job.error }}">{{ job.error }}</small>{% endif %}
-                      <div class="dl-progress {% if display_status in ['pending', 'running'] %}is-indeterminate{% endif %}" data-progress {% if display_status not in ['pending', 'running'] %}hidden{% endif %}>
+                      <div class="dl-progress {% if display_status in ['pending', 'downloading', 'extracting'] %}is-indeterminate{% endif %}" data-progress {% if display_status not in ['pending', 'downloading', 'extracting'] %}hidden{% endif %}>
                         <div class="dl-bar"><i></i></div>
                         <small class="dl-label">
-                          {% if display_status == 'running' and job.progress_stage == 'fetching' %}Running — fetching Telegram message…
-                          {% elif display_status == 'running' and job.progress_stage == 'downloading' %}Running — downloading media…
-                          {% elif display_status == 'running' %}Running — extracting and scanning…
-                          {% elif job.progress_stage == 'queued' %}Pending — waiting for download worker
+                          {% if stage == 'fetching' %}Downloading — fetching Telegram message…
+                          {% elif stage == 'downloading' %}Downloading — media…
+                          {% elif stage == 'extracting' %}Extracting — unpacking archive…
+                          {% elif stage == 'scanning' %}Extracting — scanning credentials…
+                          {% elif stage == 'queued' %}Pending — waiting for download worker
+                          {% elif display_status == 'extracting' %}Extracting — unpacking archive…
+                          {% elif display_status == 'pending' %}Pending — waiting for worker
                           {% else %}Pending — waiting for worker{% endif %}
                         </small>
                       </div>

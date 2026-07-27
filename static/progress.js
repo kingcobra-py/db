@@ -29,21 +29,31 @@
     });
   }
 
+  function displayPhase(data) {
+    var stage = String(data.stage || "").toLowerCase();
+    if (data.status === "completed") return "completed";
+    if (data.status === "failed") return "failed";
+    if (stage === "queued" || stage === "fetching" || stage === "downloading") return "downloading";
+    if (stage === "extracting" || stage === "scanning" || data.status === "running") return "extracting";
+    return "pending";
+  }
+
+  function phaseLabel(phase) {
+    if (phase === "completed") return "Successful";
+    if (phase === "failed") return "Failed";
+    if (phase === "downloading") return "Downloading";
+    if (phase === "extracting") return "Extracting";
+    return "Pending";
+  }
+
   function updateStatus(row, data) {
     var badge = row.querySelector(".status");
     if (!badge) return;
-    var stage = data.stage || "";
-    var state =
-      data.status === "completed"
-        ? "completed"
-        : data.status === "failed"
-          ? "failed"
-          : data.status === "running" || stage === "fetching" || stage === "downloading"
-            ? "running"
-            : "pending";
-    badge.className = "status " + state;
-    badge.textContent = state === "completed" ? "Successful" : state.charAt(0).toUpperCase() + state.slice(1);
+    var phase = displayPhase(data);
+    badge.className = "status " + phase;
+    badge.textContent = phaseLabel(phase);
     row.setAttribute("data-job-status", data.status || row.getAttribute("data-job-status") || "");
+    row.setAttribute("data-job-stage", String(data.stage || "").toLowerCase());
   }
 
   function renderProgress(row, data) {
@@ -51,13 +61,14 @@
     var box = row.querySelector("[data-progress]");
     if (!box) return;
 
-    var stage = data.stage || "";
+    var stage = String(data.stage || "").toLowerCase();
+    var phase = displayPhase(data);
     var active =
+      phase === "pending" ||
+      phase === "downloading" ||
+      phase === "extracting" ||
       data.status === "pending" ||
-      data.status === "running" ||
-      stage === "downloading" ||
-      stage === "queued" ||
-      stage === "fetching";
+      data.status === "running";
     if (!active) {
       box.hidden = true;
       return;
@@ -69,7 +80,12 @@
     var fill = box.querySelector(".dl-bar > i");
     var label = box.querySelector(".dl-label");
     var percent = Math.max(0, Math.min(100, Number(data.percent) || 0));
-    var indeterminate = stage === "queued" || stage === "fetching" || !(Number(data.total) > 0);
+    var indeterminate =
+      stage === "queued" ||
+      stage === "fetching" ||
+      stage === "extracting" ||
+      stage === "scanning" ||
+      !(Number(data.total) > 0);
     box.classList.toggle("is-indeterminate", indeterminate);
     if (fill && !indeterminate) fill.style.width = percent + "%";
 
@@ -79,18 +95,26 @@
       return;
     }
     if (stage === "fetching") {
-      label.textContent = "Running — fetching Telegram message…";
+      label.textContent = "Downloading — fetching Telegram message…";
       return;
     }
     var filename = data.file || "file";
     var position = data.index && data.count ? " (" + data.index + "/" + data.count + ")" : "";
     if (stage === "downloading" && Number(data.total) > 0) {
       label.textContent =
-        "Running — " + filename + position + " · " + percent + "% · " + human(data.done) + " / " + human(data.total);
+        "Downloading — " + filename + position + " · " + percent + "% · " + human(data.done) + " / " + human(data.total);
       return;
     }
-    if (data.status === "running") {
-      label.textContent = "Running — extracting and scanning…";
+    if (stage === "downloading") {
+      label.textContent = "Downloading — media…";
+      return;
+    }
+    if (stage === "scanning") {
+      label.textContent = "Extracting — scanning credentials…";
+      return;
+    }
+    if (stage === "extracting" || data.status === "running") {
+      label.textContent = "Extracting — unpacking archive…";
       return;
     }
     label.textContent = "Pending — waiting for extraction worker";
