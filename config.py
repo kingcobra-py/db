@@ -49,6 +49,8 @@ class Settings:
     dashboard_password: str; dashboard_secret: bytes
     password_encryption_key: bytes
     host: str; port: int; log_level: str
+    cred_alert_bot_token: str
+    cred_alert_chat_id: int | None
 
     @property
     def inbox_dir(self): return self.data_root / "inbox"
@@ -71,6 +73,16 @@ class Settings:
         self.data_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         for path in (self.inbox_dir, self.work_dir, self.output_dir):
             path.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+
+def optional_int(name: str) -> int | None:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer Telegram chat/user ID") from exc
 
 
 def load_settings() -> Settings:
@@ -97,5 +109,7 @@ def load_settings() -> Settings:
         password_encryption_key=required("PASSWORD_ENCRYPTION_KEY").encode(),
         host=os.getenv("HOST", "0.0.0.0"), port=positive_int("PORT", 8000),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        cred_alert_bot_token=os.getenv("CRED_ALERT_BOT_TOKEN", "").strip(),
+        cred_alert_chat_id=optional_int("CRED_ALERT_CHAT_ID"),
     )
     s.prepare(); return s
