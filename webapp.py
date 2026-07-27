@@ -387,6 +387,49 @@ class Dashboard:
             LOG.info('Deleted all jobs', extra={'stage': 'control', 'deleted': count})
             return RedirectResponse(f'/?notice={quote_plus(f"Deleted {count} job(s)")}', 303)
 
+        @self.app.post('/jobs/retry-failed')
+        async def retry_failed_jobs(
+            request: Request,
+            csrf: str = Form(...),
+            channel: str = Form(''),
+        ):
+            """Re-queue failed channel downloads that are worth retrying.
+
+            Skips permanent failures (deleted / missing / no media / no archive).
+            Optional channel filter matches source_link substring (e.g. lezgsjjs).
+            """
+            self._require_post(request, csrf)
+            if self.pipeline is None:
+                return RedirectResponse(f'/?error={quote_plus("Pipeline not ready")}', 303)
+            result = await asyncio.to_thread(self.db.failed_retry_links, channel)
+            urls = result['retry']
+            if not urls:
+                skipped = result['skipped']
+                total = result['total_failed']
+                msg = (
+                    f'No retryable failed jobs'
+                    + (f' for {channel.strip()}' if channel.strip() else '')
+                    + f' ({skipped} permanent / {total} failed skipped)'
+                )
+                return RedirectResponse(f'/?notice={quote_plus(msg)}', 303)
+            for url in urls:
+                await self.pipeline.enqueue_channel_link(url)
+            LOG.info(
+                'Retrying failed channel links',
+                extra={
+                    'stage': 'web-ingest',
+                    'queued': len(urls),
+                    'skipped': result['skipped'],
+                    'channel': (channel or '').strip() or None,
+                },
+            )
+            msg = (
+                f'Requeued {len(urls)} failed download(s)'
+                + (f' for {channel.strip()}' if channel.strip() else '')
+                + (f' (skipped {result["skipped"]} permanent)' if result['skipped'] else '')
+            )
+            return RedirectResponse(f'/?notice={quote_plus(msg)}', 303)
+
         @self.app.get('/jobs/{job_id}/progress')
         async def job_progress(job_id: int,request: Request):
             self._require(request)

@@ -367,6 +367,33 @@ class SecurityTests(unittest.TestCase):
             self.assertIn(running, ids)
             self.assertNotIn(done, ids)
 
+    def test_failed_retry_links_skips_permanent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            a = db.create_job(1, 0, 0, [], "channel-link", "https://t.me/lezgsjjs/100")
+            b = db.create_job(2, 0, 0, [], "channel-link", "https://t.me/lezgsjjs/101")
+            c = db.create_job(3, 0, 0, [], "channel-link", "https://t.me/other/50")
+            d = db.create_job(4, 0, 0, [], "channel-link", "https://t.me/lezgsjjs/102")
+            db.mark_failed(a, "Stopped by operator")
+            db.mark_failed(b, "ValueError: Message 101 was deleted or is not visible (channel latest is 200)")
+            db.mark_failed(c, "Stopped by operator")
+            db.mark_failed(d, "ExtractionError: wrong password")
+            all_retry = db.failed_retry_links()
+            self.assertEqual(
+                all_retry["retry"],
+                ["https://t.me/other/50", "https://t.me/lezgsjjs/100", "https://t.me/lezgsjjs/102"],
+            )
+            self.assertEqual(all_retry["skipped"], 1)
+            self.assertEqual(all_retry["total_failed"], 4)
+            filtered = db.failed_retry_links("lezgsjjs")
+            self.assertEqual(
+                filtered["retry"],
+                ["https://t.me/lezgsjjs/100", "https://t.me/lezgsjjs/102"],
+            )
+            self.assertEqual(filtered["skipped"], 1)
+            self.assertEqual(filtered["total_failed"], 3)
+
     def test_unlimited_archive_file_count(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive = Path(tmp) / "many.zip"

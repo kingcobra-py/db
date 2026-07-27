@@ -423,6 +423,8 @@ code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#cdeeff;ba
 
 .jobs-panel{margin-top:14px}
 .jobs-panel .panel-head-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+.jobs-panel .retry-failed-form{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.jobs-panel .retry-channel{min-width:140px;max-width:200px;height:36px;padding:0 10px;font-size:12px}
 .jobs-panel .filter-hint{color:var(--cyan)}
 .jobs-panel .table-wrap{
   max-height:min(70vh,720px);

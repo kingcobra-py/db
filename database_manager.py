@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sqlite3
 from contextlib import closing, contextmanager
@@ -478,6 +479,68 @@ class DatabaseManager:
             db.execute("DELETE FROM extracted_credentials")
             db.execute("DELETE FROM jobs")
         return count
+
+    @staticmethod
+    def is_permanent_failure(error: str | None) -> bool:
+        """Errors that will not succeed on a blind re-queue."""
+        text = (error or "").lower()
+        needles = (
+            "deleted or is not visible",
+            "does not exist in this channel",
+            "message is unavailable",
+            "no supported archive or ordinary input file",
+            "object has no attribute 'media'",
+        )
+        return any(n in text for n in needles)
+
+    def failed_retry_links(self, channel: str | None = None) -> dict[str, Any]:
+        """Unique failed channel-link URLs worth retrying.
+
+        Returns dict with keys: retry (list[str]), skipped (int), total_failed (int).
+        Permanent failures (deleted/missing/no media) are skipped.
+        """
+        needle = (channel or "").strip().lstrip("@").lower()
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT source_link, error, id
+                   FROM jobs
+                   WHERE status='failed'
+                     AND source='channel-link'
+                     AND source_link IS NOT NULL
+                     AND TRIM(source_link) != ''
+                   ORDER BY id DESC"""
+            ).fetchall()
+
+        latest: dict[str, str | None] = {}
+        for row in rows:
+            url = str(row["source_link"]).strip()
+            if not url:
+                continue
+            if needle and needle not in url.lower():
+                continue
+            # Keep newest failure per URL.
+            if url not in latest:
+                latest[url] = row["error"]
+
+        retry: list[str] = []
+        skipped = 0
+        for url, error in latest.items():
+            if self.is_permanent_failure(error):
+                skipped += 1
+                continue
+            retry.append(url)
+
+        # Stable order by Telegram message id when present.
+        def sort_key(u: str) -> tuple[int, str]:
+            m = re.search(r"/(\d+)(?:/?$)", u)
+            return (int(m.group(1)) if m else 0, u)
+
+        retry.sort(key=sort_key)
+        return {
+            "retry": retry,
+            "skipped": skipped,
+            "total_failed": len(latest),
+        }
 
     def output_for_job(self,job_id,kind):
         if kind not in {"report", "summary"}:
