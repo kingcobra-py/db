@@ -626,10 +626,61 @@ class Pipeline:
                 live.first_name or live.label,
                 extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest', 'session_id': session_id},
             )
-            await self.ingest_channel_link(url, job_id, job_key, client=live.client)
+            await self.ingest_channel_link(
+                url, job_id, job_key, client=live.client, session_id=session_id
+            )
             await asyncio.sleep(0.75)
         finally:
             live.active_jobs = max(0, live.active_jobs - 1)
+
+    async def _resolve_channel_message(self, client: TelegramClient, url: str):
+        """Resolve a t.me message link to (entity, message, messages_for_album)."""
+        target, message_id = self.validate_channel_link(url)
+        if target.startswith('c:'):
+            entity = await client.get_entity(PeerChannel(int(target[2:])))
+        else:
+            entity = await client.get_entity(target)
+        message = await client.get_messages(entity, ids=message_id)
+        if not message:
+            latest = await client.get_messages(entity, limit=1)
+            latest_id = int(latest[0].id) if latest else None
+            if latest_id is not None and message_id > latest_id:
+                raise ValueError(
+                    f'Message {message_id} does not exist in this channel '
+                    f'(latest message is {latest_id})'
+                )
+            raise ValueError(
+                f'Message {message_id} was deleted or is not visible'
+                + (f' (channel latest is {latest_id})' if latest_id is not None else '')
+            )
+        messages = [message]
+        if message.grouped_id:
+            nearby = await client.get_messages(entity, limit=100, offset_id=message_id + 50)
+            messages = sorted(
+                {
+                    m.id: m
+                    for m in [message, *nearby]
+                    if m and m.grouped_id == message.grouped_id and m.media
+                }.values(),
+                key=lambda m: m.id,
+            )
+        return entity, message, messages
+
+    @staticmethod
+    def _is_session_access_error(exc: BaseException) -> bool:
+        text = f'{type(exc).__name__}: {exc}'.lower()
+        tokens = (
+            'channelprivate',
+            'channel invalid',
+            'username invalid',
+            'username not occupied',
+            'chatadminrequired',
+            'unavailable',
+            'not visible',
+            'does not exist in this channel',
+            'was deleted',
+        )
+        return any(token in text for token in tokens)
 
     async def ingest_channel_link(
         self,
@@ -637,10 +688,11 @@ class Pipeline:
         job_id: int | None = None,
         job_key: int | None = None,
         client: TelegramClient | None = None,
+        session_id: str | None = None,
     ):
         job_key = job_key if job_key is not None else self.web_job_id(url)
-        client = client or self.client
-        if client is None:
+        preferred = client or self.client
+        if preferred is None and not any(s.online for s in self.sessions.values()):
             raise RuntimeError('No Telegram client available')
         if job_id is None:
             job_id = await asyncio.to_thread(self.db.create_job, job_key, 0, 0, [], 'channel-link', url)
@@ -651,18 +703,47 @@ class Pipeline:
                 LOG.info('Skipping stopped ingest job', extra={'job_id': job_id, 'stage': 'web-ingest'})
                 return
             LOG.info('Starting channel ingest', extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest'})
-            target,message_id=self.validate_channel_link(url)
-            if target.startswith('c:'):
-                entity = await client.get_entity(PeerChannel(int(target[2:])))
-            else:
-                entity = await client.get_entity(target)
-            message = await client.get_messages(entity, ids=message_id)
-            if not message: raise ValueError('Message is unavailable to the signed-in Telegram account')
-            messages=[message]
-            if message.grouped_id:
-                # Pull a wider nearby window so large albums are not truncated.
-                nearby = await client.get_messages(entity, limit=100, offset_id=message_id + 50)
-                messages=sorted({m.id:m for m in [message,*nearby] if m and m.grouped_id==message.grouped_id and m.media}.values(),key=lambda m:m.id)
+
+            # Prefer the assigned session, then try every other online account.
+            candidates: list[tuple[str | None, TelegramClient]] = []
+            if preferred is not None:
+                candidates.append((session_id, preferred))
+            for sid, live in self.sessions.items():
+                if not live.online:
+                    continue
+                if preferred is not None and live.client is preferred:
+                    continue
+                candidates.append((sid, live.client))
+            if not candidates and preferred is not None:
+                candidates.append((session_id, preferred))
+
+            last_exc: BaseException | None = None
+            messages = None
+            used_client = preferred
+            for sid, cand in candidates:
+                try:
+                    _, _, messages = await self._resolve_channel_message(cand, url)
+                    used_client = cand
+                    if sid and sid != session_id:
+                        LOG.info(
+                            'Resolved channel message with fallback session %s',
+                            sid,
+                            extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest', 'session_id': sid},
+                        )
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    if not self._is_session_access_error(exc):
+                        raise
+                    LOG.warning(
+                        'Session cannot access message (%s); trying next account',
+                        exc,
+                        extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest', 'session_id': sid},
+                    )
+                    continue
+            if messages is None:
+                raise last_exc or ValueError('Message is unavailable to all signed-in Telegram accounts')
+
             await asyncio.to_thread(
                 self.db.update_progress, job_id, 'downloading', 0, 0,
                 getattr(getattr(messages[0], 'file', None), 'name', None) or 'media', 1, len(messages),
