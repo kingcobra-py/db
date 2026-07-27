@@ -325,7 +325,15 @@ class DatabaseManager:
         return int(self.ingest_status()["queued"])
 
     def mark_running(self,job_id):
-        with self.connect() as db: db.execute("UPDATE jobs SET status='running',attempts=attempts+1,started_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP,error=NULL WHERE id=?",(job_id,))
+        with self.connect() as db:
+            db.execute(
+                """UPDATE jobs SET status='running', attempts=attempts+1,
+                    progress_stage='extracting', progress_done=0, progress_total=0,
+                    progress_file='extracting archive', progress_index=0, progress_count=0,
+                    started_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP, error=NULL
+                    WHERE id=?""",
+                (job_id,),
+            )
 
     def update_progress(self,job_id,stage,done,total,filename,index,count):
         with self.connect() as db:
@@ -412,7 +420,7 @@ class DatabaseManager:
                           progress_file, progress_index, progress_count
                    FROM jobs
                    WHERE status='running'
-                      OR (status='pending' AND progress_stage IN ('fetching','downloading','queued'))
+                      OR (status='pending' AND progress_stage IN ('fetching','downloading','queued','extracting','scanning'))
                    ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, id DESC
                    LIMIT ?""",
                 (limit,),

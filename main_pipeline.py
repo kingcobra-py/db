@@ -735,6 +735,9 @@ class Pipeline:
             root=await asyncio.to_thread(self.extractor.process,job.message_id,[Path(p) for p in job.input_files])
             
             # Notify about scan start
+            await asyncio.to_thread(
+                self.db.update_progress, job.id, 'scanning', 0, 0, 'scanning credentials', 0, 0
+            )
             await self.notify(job.chat_id,'🔎 Scanning for credentials in extracted files…',job.message_id)
             LOG.info('Starting credential scan',extra={'job_id':job.id,'message_id':job.message_id,'stage':'processing'})
             
