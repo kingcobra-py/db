@@ -595,9 +595,15 @@ class Pipeline:
             await asyncio.to_thread(self.db.clear_progress,job_id)
             shutil.rmtree(inbox,ignore_errors=True)
             raise
-        except Exception:
-            await asyncio.to_thread(self.db.clear_progress,job_id)
-            shutil.rmtree(inbox,ignore_errors=True); raise
+        except Exception as exc:
+            # Always fail the DB row — otherwise empty pending jobs sit forever
+            # (ingest only claims channel-link rows; extract only runs after queue.put).
+            await asyncio.to_thread(
+                self.db.mark_failed, job_id, f'{type(exc).__name__}: {exc}'
+            )
+            await asyncio.to_thread(self.db.clear_progress, job_id)
+            shutil.rmtree(inbox, ignore_errors=True)
+            raise
 
     async def enqueue_channel_link(self, url: str) -> int:
         """Create a visible pending job and immediately schedule its download."""
@@ -1035,17 +1041,39 @@ class Pipeline:
                     )
                     await self.notify(job.chat_id,creds_msg,job.message_id)
                     if self.client is not None and creds_file.is_file():
-                        await self.client.send_file(job.chat_id,str(creds_file),caption=creds_msg,reply_to=job.message_id)
+                        try:
+                            await self.client.send_file(
+                                job.chat_id, str(creds_file), caption=creds_msg, reply_to=job.message_id
+                            )
+                        except Exception:
+                            LOG.exception(
+                                'Could not send credentials file to chat',
+                                extra={'job_id': job.id, 'message_id': job.message_id, 'stage': 'notification'},
+                            )
             else:
                 if job.chat_id:
                     await self.notify(job.chat_id,'⚠️ No raw AWS credentials found in extracted files',job.message_id)
                 LOG.info('No raw credentials found',extra={'job_id':job.id,'message_id':job.message_id,'stage':'processing'})
             
-            # Send redacted reports
+            # Send redacted reports (best-effort — chat bans must not fail a completed scan).
             if job.chat_id and self.client is not None:
-                await self.client.send_file(job.chat_id,str(text),caption=f"📄 Redacted Report (Files: {summary['files_scanned']}, Findings: {summary['findings']})",reply_to=job.message_id)
-                await self.client.send_file(job.chat_id,str(summary_json),caption='📊 Machine-readable summary (JSON)',reply_to=job.message_id)
-                
+                try:
+                    await self.client.send_file(
+                        job.chat_id, str(text),
+                        caption=f"📄 Redacted Report (Files: {summary['files_scanned']}, Findings: {summary['findings']})",
+                        reply_to=job.message_id,
+                    )
+                    await self.client.send_file(
+                        job.chat_id, str(summary_json),
+                        caption='📊 Machine-readable summary (JSON)',
+                        reply_to=job.message_id,
+                    )
+                except Exception:
+                    LOG.exception(
+                        'Could not send report files to chat',
+                        extra={'job_id': job.id, 'message_id': job.message_id, 'stage': 'notification'},
+                    )
+
             LOG.info('Job completed successfully',extra={'job_id':job.id,'message_id':job.message_id,'stage':'processing'})
         except Exception as exc:
             LOG.exception('Job failed',extra={'job_id':job.id,'message_id':job.message_id,'user_id':job.user_id,'stage':'processing'})

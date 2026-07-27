@@ -13,6 +13,8 @@ from typing import Any
 class Job:
     id: int; message_id: int; chat_id: int; user_id: int
     input_files: list[str]; status: str; attempts: int
+    source: str = 'telegram'
+    source_link: str | None = None
 
 class DatabaseManager:
     def __init__(self, path: Path, inbox_dir: Path | None = None, work_dir: Path | None = None, output_dir: Path | None = None):
@@ -122,7 +124,14 @@ class DatabaseManager:
                 secret_key TEXT, region TEXT, file_path TEXT, line_number INTEGER,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
-    def _job(self, r): return Job(int(r['id']),int(r['message_id']),int(r['chat_id']),int(r['user_id']),json.loads(r['input_files_json']),str(r['status']),int(r['attempts']))
+    def _job(self, r):
+        return Job(
+            int(r['id']), int(r['message_id']), int(r['chat_id']), int(r['user_id']),
+            json.loads(r['input_files_json']), str(r['status']), int(r['attempts']),
+            source=str(r['source'] or 'telegram') if 'source' in r.keys() else 'telegram',
+            source_link=(str(r['source_link']) if r['source_link'] is not None else None)
+            if 'source_link' in r.keys() else None,
+        )
 
     def create_job(self,message_id,chat_id,user_id,files,source='telegram',source_link=None):
         with self.connect() as db:
