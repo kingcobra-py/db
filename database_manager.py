@@ -542,6 +542,46 @@ class DatabaseManager:
             "total_failed": len(latest),
         }
 
+    def completed_channel_message_ids(self, channel: str) -> set[int]:
+        """Telegram message IDs already completed for a public channel username."""
+        needle = (channel or "").strip().lstrip("@").lower()
+        if not needle:
+            return set()
+        ids: set[int] = set()
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT source_link FROM jobs
+                   WHERE status='completed'
+                     AND source_link IS NOT NULL
+                     AND LOWER(source_link) LIKE ?""",
+                (f"%t.me/{needle}/%",),
+            ).fetchall()
+        for row in rows:
+            m = re.search(r"/(\d+)(?:/?$)", str(row["source_link"] or ""))
+            if m:
+                ids.add(int(m.group(1)))
+        return ids
+
+    def pending_channel_message_ids(self, channel: str) -> set[int]:
+        """Telegram message IDs already queued/running for a public channel username."""
+        needle = (channel or "").strip().lstrip("@").lower()
+        if not needle:
+            return set()
+        ids: set[int] = set()
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT source_link FROM jobs
+                   WHERE status IN ('pending','running')
+                     AND source_link IS NOT NULL
+                     AND LOWER(source_link) LIKE ?""",
+                (f"%t.me/{needle}/%",),
+            ).fetchall()
+        for row in rows:
+            m = re.search(r"/(\d+)(?:/?$)", str(row["source_link"] or ""))
+            if m:
+                ids.add(int(m.group(1)))
+        return ids
+
     def output_for_job(self,job_id,kind):
         if kind not in {"report", "summary"}:
             raise ValueError(f"Unknown output kind: {kind!r}")

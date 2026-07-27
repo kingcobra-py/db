@@ -112,6 +112,17 @@
                 </div>
                 <p class="form-help">Any online Telegram session with channel access can download. Example: <code>channel/100-105</code>.</p>
               </form>
+              <form method="post" action="/channel-scan" class="queue-form scan-form">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <div class="command-row scan-row">
+                  <span class="prompt" aria-hidden="true">⌕</span>
+                  <input class="command-input" name="channel" type="text" placeholder="channel e.g. lezgsjjs" value="lezgsjjs" required aria-label="Channel username">
+                  <input class="command-input scan-id" name="start_id" type="number" min="1" placeholder="start" aria-label="Start message id">
+                  <input class="command-input scan-id" name="end_id" type="number" min="1" placeholder="end" aria-label="End message id">
+                  <button class="command-submit" type="submit">Scan &amp; queue media</button>
+                </div>
+                <p class="form-help">Finds messages that still have files, skips already completed/pending. Leave start/end blank to scan the latest ~2000.</p>
+              </form>
             </div>
           </section>
 

@@ -367,6 +367,37 @@ class Dashboard:
             LOG.info('Channel links accepted', extra={'stage': 'web-ingest', 'count': count})
             return RedirectResponse(f'/?notice={quote_plus(msg)}', 303)
 
+        @self.app.post('/channel-scan')
+        async def scan_channel(
+            request: Request,
+            csrf: str = Form(...),
+            channel: str = Form(...),
+            start_id: str = Form(''),
+            end_id: str = Form(''),
+        ):
+            """Scan a channel for messages that still have media and queue them."""
+            self._require_post(request, csrf)
+            if self.pipeline is None:
+                return RedirectResponse(f'/?error={quote_plus("Pipeline not ready")}', 303)
+            try:
+                start = int(start_id.strip()) if start_id.strip() else None
+                end = int(end_id.strip()) if end_id.strip() else None
+            except ValueError:
+                return RedirectResponse(f'/?error={quote_plus("start/end must be numbers")}', 303)
+            try:
+                result = await self.pipeline.scan_channel_media(
+                    channel, start_id=start, end_id=end, enqueue=True,
+                )
+            except Exception as exc:
+                LOG.exception('Channel scan failed', extra={'stage': 'channel-scan'})
+                return RedirectResponse(f'/?error={quote_plus(str(exc))}', 303)
+            msg = (
+                f"Scanned @{result['channel']} {result['start_id']}-{result['end_id']} "
+                f"(latest {result['latest_id']}): found {result['found']} media, "
+                f"queued {result['queued']}"
+            )
+            return RedirectResponse(f'/?notice={quote_plus(msg)}', 303)
+
         @self.app.post('/jobs/stop-all')
         async def stop_all_jobs(request: Request, csrf: str = Form(...)):
             """Stop all running and pending jobs."""

@@ -608,6 +608,114 @@ class Pipeline:
         LOG.info('Channel link enqueued', extra={'job_id': job_id, 'message_id': job_key, 'stage': 'web-ingest'})
         return job_id
 
+    async def scan_channel_media(
+        self,
+        channel: str,
+        *,
+        start_id: int | None = None,
+        end_id: int | None = None,
+        enqueue: bool = True,
+        limit: int = 2000,
+    ) -> dict:
+        """Find messages with media in a channel range and optionally queue them.
+
+        Skips IDs already completed or already pending/running. Albums are
+        de-duplicated to one queue item (the lowest message id in the group).
+        """
+        username = (channel or '').strip().lstrip('@')
+        if not username or not username.replace('_', '').isalnum():
+            raise ValueError('Channel must be a public Telegram username')
+        if limit < 1 or limit > 5000:
+            raise ValueError('limit must be between 1 and 5000')
+
+        client = None
+        for live in self.sessions.values():
+            if live.online and live.client is not None:
+                client = live.client
+                break
+        if client is None:
+            client = self.client
+        if client is None:
+            raise RuntimeError('No online Telegram session available')
+
+        entity = await client.get_entity(username)
+        latest_batch = await client.get_messages(entity, limit=1)
+        latest_id = int(latest_batch[0].id) if latest_batch else 0
+        if latest_id <= 0:
+            raise ValueError(f'Channel @{username} has no messages')
+
+        hi = min(end_id if end_id is not None else latest_id, latest_id)
+        lo = start_id if start_id is not None else max(1, hi - limit + 1)
+        if lo < 1:
+            lo = 1
+        if hi < lo:
+            raise ValueError('start_id must be <= end_id')
+        if hi - lo + 1 > 5000:
+            raise ValueError('Scan range too large (max 5000)')
+
+        done_ids = await asyncio.to_thread(self.db.completed_channel_message_ids, username)
+        pending_ids = await asyncio.to_thread(self.db.pending_channel_message_ids, username)
+        skip_ids = done_ids | pending_ids
+
+        found: list[dict] = []
+        seen_albums: set[int] = set()
+        # Probe in chunks — deleted IDs come back as None.
+        chunk = 80
+        for offset in range(lo, hi + 1, chunk):
+            ids = list(range(offset, min(offset + chunk, hi + 1)))
+            messages = await client.get_messages(entity, ids=ids)
+            if not isinstance(messages, list):
+                messages = [messages]
+            for msg in messages:
+                if not msg or not getattr(msg, 'media', None):
+                    continue
+                mid = int(msg.id)
+                if mid in skip_ids:
+                    continue
+                grouped = getattr(msg, 'grouped_id', None)
+                if grouped is not None:
+                    gid = int(grouped)
+                    if gid in seen_albums:
+                        continue
+                    seen_albums.add(gid)
+                found.append({
+                    'message_id': mid,
+                    'url': f'https://t.me/{username}/{mid}',
+                    'grouped_id': int(grouped) if grouped is not None else None,
+                })
+            await asyncio.sleep(0.15)
+
+        found.sort(key=lambda item: item['message_id'])
+        queued = 0
+        if enqueue:
+            for item in found:
+                await self.enqueue_channel_link(item['url'])
+                queued += 1
+
+        result = {
+            'channel': username,
+            'latest_id': latest_id,
+            'start_id': lo,
+            'end_id': hi,
+            'found': len(found),
+            'queued': queued,
+            'skipped_completed': len(done_ids),
+            'urls': [item['url'] for item in found],
+        }
+        LOG.info(
+            'Channel media scan finished',
+            extra={
+                'stage': 'channel-scan',
+                'channel': username,
+                'found': len(found),
+                'queued': queued,
+                'start_id': lo,
+                'end_id': hi,
+                'latest_id': latest_id,
+            },
+        )
+        return result
+
     def kick_ingest(self) -> None:
         """Reconcile DB pending rows with tracked per-job download tasks."""
         try:
