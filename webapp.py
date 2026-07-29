@@ -359,12 +359,22 @@ class Dashboard:
 
             # Queue sequentially via ingest worker to avoid Telegram flood failures.
             # Each URL creates a pending job immediately so it appears in Recent jobs.
+            queued = 0
+            skipped = 0
             for submit_url in urls_to_submit:
-                await self.pipeline.enqueue_channel_link(submit_url)
+                job_id = await self.pipeline.enqueue_channel_link(submit_url)
+                if job_id is None:
+                    skipped += 1
+                else:
+                    queued += 1
 
-            count = len(urls_to_submit)
-            msg = f"Queued {count} download(s)" if count > 1 else "Channel download queued"
-            LOG.info('Channel links accepted', extra={'stage': 'web-ingest', 'count': count})
+            if queued == 0 and skipped:
+                msg = f"Skipped {skipped} duplicate link(s) (already queued or completed)"
+            elif skipped:
+                msg = f"Queued {queued} download(s), skipped {skipped} duplicate(s)"
+            else:
+                msg = f"Queued {queued} download(s)" if queued > 1 else "Channel download queued"
+            LOG.info('Channel links accepted', extra={'stage': 'web-ingest', 'queued': queued, 'skipped': skipped})
             return RedirectResponse(f'/?notice={quote_plus(msg)}', 303)
 
         @self.app.post('/channel-scan')
@@ -395,6 +405,7 @@ class Dashboard:
                 f"Scanned @{result['channel']} {result['start_id']}-{result['end_id']} "
                 f"(latest {result['latest_id']}): found {result['found']} media, "
                 f"queued {result['queued']}"
+                + (f", skipped {result.get('skipped', 0)} duplicate(s)" if result.get('skipped') else "")
             )
             return RedirectResponse(f'/?notice={quote_plus(msg)}', 303)
 
@@ -443,22 +454,35 @@ class Dashboard:
                     + f' ({skipped} permanent / {total} failed skipped)'
                 )
                 return RedirectResponse(f'/?notice={quote_plus(msg)}', 303)
+            queued = 0
+            skipped_dup = 0
             for url in urls:
-                await self.pipeline.enqueue_channel_link(url)
+                job_id = await self.pipeline.enqueue_channel_link(url)
+                if job_id is None:
+                    skipped_dup += 1
+                else:
+                    queued += 1
             LOG.info(
                 'Retrying failed channel links',
                 extra={
                     'stage': 'web-ingest',
-                    'queued': len(urls),
-                    'skipped': result['skipped'],
+                    'queued': queued,
+                    'skipped_permanent': result['skipped'],
+                    'skipped_duplicate': skipped_dup,
                     'channel': (channel or '').strip() or None,
                 },
             )
             msg = (
-                f'Requeued {len(urls)} failed download(s)'
+                f'Requeued {queued} failed download(s)'
                 + (f' for {channel.strip()}' if channel.strip() else '')
-                + (f' (skipped {result["skipped"]} permanent)' if result['skipped'] else '')
             )
+            extras = []
+            if result['skipped']:
+                extras.append(f'{result["skipped"]} permanent')
+            if skipped_dup:
+                extras.append(f'{skipped_dup} duplicate')
+            if extras:
+                msg += f' (skipped {", ".join(extras)})'
             return RedirectResponse(f'/?notice={quote_plus(msg)}', 303)
 
         @self.app.get('/jobs/{job_id}/progress')

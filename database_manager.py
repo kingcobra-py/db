@@ -591,6 +591,67 @@ class DatabaseManager:
                 ids.add(int(m.group(1)))
         return ids
 
+    def find_channel_link_job(self, url: str, *, statuses: tuple[str, ...] = ('pending', 'running', 'completed')) -> int | None:
+        """Return newest job id for this exact channel URL in the given statuses."""
+        link = (url or "").strip()
+        if not link:
+            return None
+        placeholders = ",".join("?" for _ in statuses)
+        with self.connect() as db:
+            row = db.execute(
+                f"""SELECT id FROM jobs
+                    WHERE source='channel-link'
+                      AND source_link=?
+                      AND status IN ({placeholders})
+                    ORDER BY id DESC LIMIT 1""",
+                (link, *statuses),
+            ).fetchone()
+        return int(row["id"]) if row else None
+
+    def dedupe_channel_queue(self) -> dict[str, int]:
+        """Remove duplicate pending channel-link jobs for the same URL.
+
+        Keeps one active job per source_link (prefer running, else oldest pending).
+        Drops pending copies when a completed job already exists for that URL.
+        Never deletes a currently running job.
+        """
+        with self.connect() as db:
+            rows = list(db.execute(
+                """SELECT id, source_link, status FROM jobs
+                   WHERE source='channel-link'
+                     AND source_link IS NOT NULL AND TRIM(source_link) != ''
+                     AND status IN ('pending','running','completed')
+                   ORDER BY id ASC"""
+            ))
+        by_link: dict[str, list[tuple[int, str]]] = {}
+        for row in rows:
+            url = str(row["source_link"]).strip()
+            by_link.setdefault(url, []).append((int(row["id"]), str(row["status"])))
+
+        delete_ids: list[int] = []
+        for url, items in by_link.items():
+            completed = [jid for jid, st in items if st == "completed"]
+            running = [jid for jid, st in items if st == "running"]
+            pending = [jid for jid, st in items if st == "pending"]
+            if completed:
+                delete_ids.extend(pending)
+                continue
+            keep: int | None = running[0] if running else (pending[0] if pending else None)
+            if keep is None:
+                continue
+            for jid in pending:
+                if jid != keep:
+                    delete_ids.append(jid)
+
+        removed = 0
+        if delete_ids:
+            with self.connect() as db:
+                for jid in delete_ids:
+                    db.execute("DELETE FROM extracted_credentials WHERE job_id=?", (jid,))
+                    cur = db.execute("DELETE FROM jobs WHERE id=? AND status='pending'", (jid,))
+                    removed += int(cur.rowcount)
+        return {"removed": removed, "links": len(by_link), "candidates": len(delete_ids)}
+
     def output_for_job(self,job_id,kind):
         if kind not in {"report", "summary"}:
             raise ValueError(f"Unknown output kind: {kind!r}")

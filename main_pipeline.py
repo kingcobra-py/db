@@ -605,8 +605,23 @@ class Pipeline:
             shutil.rmtree(inbox, ignore_errors=True)
             raise
 
-    async def enqueue_channel_link(self, url: str) -> int:
-        """Create a visible pending job and immediately schedule its download."""
+    async def enqueue_channel_link(self, url: str) -> int | None:
+        """Create a visible pending job and schedule download.
+
+        Skips when the same source_link is already pending, running, or completed
+        so range/scan submits cannot multiply one Telegram post into many jobs.
+        """
+        url = (url or '').strip()
+        existing = await asyncio.to_thread(
+            self.db.find_channel_link_job, url, statuses=('pending', 'running', 'completed')
+        )
+        if existing is not None:
+            LOG.info(
+                'Skipping duplicate channel link (already job %s)',
+                existing,
+                extra={'job_id': existing, 'stage': 'web-ingest'},
+            )
+            return None
         job_key = self.web_job_id(url)
         job_id = await asyncio.to_thread(self.db.create_job, job_key, 0, 0, [], 'channel-link', url)
         await asyncio.to_thread(self.db.update_progress, job_id, 'queued', 0, 0, 'waiting', 0, 0)
@@ -693,10 +708,14 @@ class Pipeline:
 
         found.sort(key=lambda item: item['message_id'])
         queued = 0
+        skipped = 0
         if enqueue:
             for item in found:
-                await self.enqueue_channel_link(item['url'])
-                queued += 1
+                job_id = await self.enqueue_channel_link(item['url'])
+                if job_id is None:
+                    skipped += 1
+                else:
+                    queued += 1
 
         result = {
             'channel': username,
@@ -705,6 +724,7 @@ class Pipeline:
             'end_id': hi,
             'found': len(found),
             'queued': queued,
+            'skipped': skipped,
             'skipped_completed': len(done_ids),
             'urls': [item['url'] for item in found],
         }
