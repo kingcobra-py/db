@@ -995,22 +995,21 @@ class Pipeline:
                 await asyncio.sleep(2.0)
 
     def register(self):
-        if self.client is None:
-            raise RuntimeError('No online Telegram session available for event handlers')
+        """Telegram event handlers.
 
-        @self.client.on(events.Album)
-        async def album(event):
-            uid=int(event.sender_id or 0)
-            if uid not in self.s.allowed_users: return
-            try: await self.queue_messages(messages=list(event.messages),job_key=min(m.id for m in event.messages),chat_id=int(event.chat_id),user_id=uid,source='telegram')
-            except Exception as exc: await self.notify(int(event.chat_id),f'❌ Download failed: {type(exc).__name__}: {exc}',min(m.id for m in event.messages))
-        @self.client.on(events.NewMessage(incoming=True))
-        async def message(event):
-            if not event.message.media or event.message.grouped_id is not None: return
-            uid=int(event.sender_id or 0)
-            if uid not in self.s.allowed_users: return
-            try: await self.queue_messages(messages=[event.message],job_key=int(event.message.id),chat_id=int(event.chat_id),user_id=uid,source='telegram')
-            except Exception as exc: await self.notify(int(event.chat_id),f'❌ Download failed: {type(exc).__name__}: {exc}',event.message.id)
+        Auto-ingest of group/private media uploads is intentionally disabled.
+        Downloads are started only from the dashboard (channel link / scan).
+        """
+        if self.client is None:
+            LOG.info(
+                'No primary Telegram client for event handlers; dashboard channel ingest still works',
+                extra={'stage': 'startup'},
+            )
+            return
+        LOG.info(
+            'Live Telegram auto-ingest disabled (group/private uploads are ignored)',
+            extra={'stage': 'startup'},
+        )
 
     async def process(self,job:Job):
         if self._stop_requested.is_set():
@@ -1187,6 +1186,13 @@ class Pipeline:
             except Exception:
                 LOG.exception('Failed to mirror primary session to legacy path', extra={'stage': 'startup'})
         _, extract_jobs = await asyncio.to_thread(self.db.restore_interrupted_work)
+        dedupe = await asyncio.to_thread(self.db.dedupe_channel_queue)
+        if dedupe.get('removed'):
+            LOG.info(
+                'Removed %s duplicate pending channel job(s)',
+                dedupe['removed'],
+                extra={'stage': 'startup', 'links': dedupe.get('links'), 'candidates': dedupe.get('candidates')},
+            )
         queued = await asyncio.to_thread(self.db.count_queued_channel_downloads)
         for job in extract_jobs:
             await self.queue.put(QueueItem(job.id))
