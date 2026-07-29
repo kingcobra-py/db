@@ -1,0 +1,126 @@
+/* ── reset + theme tokens ── */
+:root {
+  --c-primary: #4f46e5;
+  --c-primary-light: #818cf8;
+  --c-accent: #06b6d4;
+  --c-success: #10b981;
+  --c-warning: #f59e0b;
+  --c-danger: #ef4444;
+  --c-surface: #ffffff;
+  --c-surface-dim: #f8fafc;
+  --c-bg-dark: #0f172a;
+  --c-bg-mid: #1e293b;
+  --c-text: #0f172a;
+  --c-text-2: #475569;
+  --c-text-3: #94a3b8;
+  --c-border: #e2e8f0;
+  --radius: 12px;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,.05);
+  --shadow-md: 0 4px 6px -1px rgba(0,0,0,.1), 0 2px 4px -2px rgba(0,0,0,.1);
+  --shadow-lg: 0 10px 15px -3px rgba(0,0,0,.1), 0 4px 6px -4px rgba(0,0,0,.1);
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; }
+
+html {
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  background: var(--c-surface-dim);
+  color: var(--c-text);
+  line-height: 1.6;
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── reusable ── */
+.section {
+  padding: 96px 24px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+@media (max-width: 768px) {
+  .section { padding: 56px 16px; }
+}
+
+/* ── glass card ── */
+.glass-card {
+  background: rgba(255,255,255,.7);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow .25s, transform .25s;
+}
+.glass-card:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-2px);
+}
+
+/* ── gradient text ── */
+.gradient-text {
+  background: linear-gradient(135deg, var(--c-primary), var(--c-accent));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ── code block ── */
+.code-block {
+  background: var(--c-bg-dark);
+  color: #e2e8f0;
+  padding: 20px 24px;
+  border-radius: var(--radius);
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: .85rem;
+  line-height: 1.7;
+  overflow-x: auto;
+  white-space: pre;
+  border: 1px solid var(--c-bg-mid);
+}
+
+/* ── badge strip ── */
+.badge-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+
+/* ── hero BG ── */
+.hero-bg {
+  background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 50%, #0f172a 100%);
+  position: relative;
+  overflow: hidden;
+}
+.hero-bg::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 30% 50%, rgba(79,70,229,.15) 0%, transparent 60%),
+              radial-gradient(circle at 70% 50%, rgba(6,182,212,.12) 0%, transparent 60%);
+  pointer-events: none;
+}
+
+/* ── footer ── */
+.footer {
+  background: var(--c-bg-dark);
+  color: var(--c-text-3);
+  text-align: center;
+  padding: 32px 24px;
+  font-size: .85rem;
+}
+.footer a {
+  color: var(--c-primary-light);
+  text-decoration: none;
+}
+.footer a:hover { text-decoration: underline; }
