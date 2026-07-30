@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sqlite3
 from contextlib import closing, contextmanager
@@ -12,6 +13,8 @@ from typing import Any
 class Job:
     id: int; message_id: int; chat_id: int; user_id: int
     input_files: list[str]; status: str; attempts: int
+    source: str = 'telegram'
+    source_link: str | None = None
 
 class DatabaseManager:
     def __init__(self, path: Path, inbox_dir: Path | None = None, work_dir: Path | None = None, output_dir: Path | None = None):
@@ -121,7 +124,14 @@ class DatabaseManager:
                 secret_key TEXT, region TEXT, file_path TEXT, line_number INTEGER,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
-    def _job(self, r): return Job(int(r['id']),int(r['message_id']),int(r['chat_id']),int(r['user_id']),json.loads(r['input_files_json']),str(r['status']),int(r['attempts']))
+    def _job(self, r):
+        return Job(
+            int(r['id']), int(r['message_id']), int(r['chat_id']), int(r['user_id']),
+            json.loads(r['input_files_json']), str(r['status']), int(r['attempts']),
+            source=str(r['source'] or 'telegram') if 'source' in r.keys() else 'telegram',
+            source_link=(str(r['source_link']) if r['source_link'] is not None else None)
+            if 'source_link' in r.keys() else None,
+        )
 
     def create_job(self,message_id,chat_id,user_id,files,source='telegram',source_link=None):
         with self.connect() as db:
@@ -325,7 +335,15 @@ class DatabaseManager:
         return int(self.ingest_status()["queued"])
 
     def mark_running(self,job_id):
-        with self.connect() as db: db.execute("UPDATE jobs SET status='running',attempts=attempts+1,started_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP,error=NULL WHERE id=?",(job_id,))
+        with self.connect() as db:
+            db.execute(
+                """UPDATE jobs SET status='running', attempts=attempts+1,
+                    progress_stage='extracting', progress_done=0, progress_total=0,
+                    progress_file='extracting archive', progress_index=0, progress_count=0,
+                    started_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP, error=NULL
+                    WHERE id=?""",
+                (job_id,),
+            )
 
     def update_progress(self,job_id,stage,done,total,filename,index,count):
         with self.connect() as db:
@@ -371,10 +389,268 @@ class DatabaseManager:
             counts={r['status']:int(r['n']) for r in db.execute("SELECT status,COUNT(*) n FROM jobs GROUP BY status")}
         return {k:counts.get(k,0) for k in ('pending','running','completed','failed')}
 
-    def recent(self,limit=25):
+    def recent(self,limit=25, status: str | None = None):
         with self.connect() as db:
-            rows=db.execute("SELECT id,message_id,status,progress_stage,source,source_link,output_text,summary_json,error,created_at,updated_at FROM jobs ORDER BY id DESC LIMIT ?",(limit,)).fetchall()
-            return [dict(r) for r in rows]
+            if status in {'pending', 'running', 'completed', 'failed'}:
+                rows = db.execute(
+                    "SELECT id,message_id,status,progress_stage,source,source_link,output_text,summary_json,summary_data,error,created_at,updated_at "
+                    "FROM jobs WHERE status=? ORDER BY id DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT id,message_id,status,progress_stage,source,source_link,output_text,summary_json,summary_data,error,created_at,updated_at "
+                    "FROM jobs ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            out = []
+            for r in rows:
+                item = dict(r)
+                metrics = None
+                raw = item.pop("summary_data", None)
+                if raw:
+                    try:
+                        data = json.loads(raw)
+                        if isinstance(data, dict):
+                            metrics = {
+                                "files_scanned": data.get("files_scanned"),
+                                "findings": data.get("findings"),
+                            }
+                    except (TypeError, ValueError):
+                        metrics = None
+                item["metrics"] = metrics
+                out.append(item)
+            return out
+
+    def live_jobs(self, limit: int = 40) -> list[dict[str, Any]]:
+        """Compact progress snapshot for active dashboard rows only."""
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT id, status, progress_stage, progress_done, progress_total,
+                          progress_file, progress_index, progress_count
+                   FROM jobs
+                   WHERE status='running'
+                      OR (status='pending' AND progress_stage IN ('fetching','downloading','queued','extracting','scanning'))
+                   ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, id DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        out = []
+        for r in rows:
+            done = int(r["progress_done"] or 0)
+            total = int(r["progress_total"] or 0)
+            out.append({
+                "id": int(r["id"]),
+                "status": r["status"],
+                "stage": r["progress_stage"],
+                "done": done,
+                "total": total,
+                "percent": int(done * 100 / total) if total else 0,
+                "file": r["progress_file"],
+                "index": int(r["progress_index"] or 0),
+                "count": int(r["progress_count"] or 0),
+            })
+        return out
+
+    def find_job_id_by_input_basename(self, basename: str, exclude_job_id: int | None = None) -> int | None:
+        """Return another job that already owns an input file with this basename."""
+        needle = Path(basename).name.strip().lower()
+        if not needle:
+            return None
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id, input_files_json FROM jobs WHERE status IN ('pending','running','completed','failed') "
+                "ORDER BY id ASC"
+            ).fetchall()
+        for row in rows:
+            job_id = int(row["id"])
+            if exclude_job_id is not None and job_id == exclude_job_id:
+                continue
+            try:
+                files = json.loads(row["input_files_json"] or "[]")
+            except (TypeError, ValueError):
+                continue
+            for file_path in files:
+                if Path(str(file_path)).name.strip().lower() == needle:
+                    return job_id
+        return None
+
+    def delete_job(self, job_id: int) -> bool:
+        with self.connect() as db:
+            db.execute("DELETE FROM extracted_credentials WHERE job_id=?", (job_id,))
+            cursor = db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+            return cursor.rowcount > 0
+
+    def delete_all_jobs(self) -> int:
+        """Remove every job row and extracted credentials. Returns jobs deleted."""
+        with self.connect() as db:
+            count = int(db.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()["n"])
+            db.execute("DELETE FROM extracted_credentials")
+            db.execute("DELETE FROM jobs")
+        return count
+
+    @staticmethod
+    def is_permanent_failure(error: str | None) -> bool:
+        """Errors that will not succeed on a blind re-queue."""
+        text = (error or "").lower()
+        needles = (
+            "deleted or is not visible",
+            "does not exist in this channel",
+            "message is unavailable",
+            "no supported archive or ordinary input file",
+            "object has no attribute 'media'",
+        )
+        return any(n in text for n in needles)
+
+    def failed_retry_links(self, channel: str | None = None) -> dict[str, Any]:
+        """Unique failed channel-link URLs worth retrying.
+
+        Returns dict with keys: retry (list[str]), skipped (int), total_failed (int).
+        Permanent failures (deleted/missing/no media) are skipped.
+        """
+        needle = (channel or "").strip().lstrip("@").lower()
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT source_link, error, id
+                   FROM jobs
+                   WHERE status='failed'
+                     AND source='channel-link'
+                     AND source_link IS NOT NULL
+                     AND TRIM(source_link) != ''
+                   ORDER BY id DESC"""
+            ).fetchall()
+
+        latest: dict[str, str | None] = {}
+        for row in rows:
+            url = str(row["source_link"]).strip()
+            if not url:
+                continue
+            if needle and needle not in url.lower():
+                continue
+            # Keep newest failure per URL.
+            if url not in latest:
+                latest[url] = row["error"]
+
+        retry: list[str] = []
+        skipped = 0
+        for url, error in latest.items():
+            if self.is_permanent_failure(error):
+                skipped += 1
+                continue
+            retry.append(url)
+
+        # Stable order by Telegram message id when present.
+        def sort_key(u: str) -> tuple[int, str]:
+            m = re.search(r"/(\d+)(?:/?$)", u)
+            return (int(m.group(1)) if m else 0, u)
+
+        retry.sort(key=sort_key)
+        return {
+            "retry": retry,
+            "skipped": skipped,
+            "total_failed": len(latest),
+        }
+
+    def completed_channel_message_ids(self, channel: str) -> set[int]:
+        """Telegram message IDs already completed for a public channel username."""
+        needle = (channel or "").strip().lstrip("@").lower()
+        if not needle:
+            return set()
+        ids: set[int] = set()
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT source_link FROM jobs
+                   WHERE status='completed'
+                     AND source_link IS NOT NULL
+                     AND LOWER(source_link) LIKE ?""",
+                (f"%t.me/{needle}/%",),
+            ).fetchall()
+        for row in rows:
+            m = re.search(r"/(\d+)(?:/?$)", str(row["source_link"] or ""))
+            if m:
+                ids.add(int(m.group(1)))
+        return ids
+
+    def pending_channel_message_ids(self, channel: str) -> set[int]:
+        """Telegram message IDs already queued/running for a public channel username."""
+        needle = (channel or "").strip().lstrip("@").lower()
+        if not needle:
+            return set()
+        ids: set[int] = set()
+        with self.connect() as db:
+            rows = db.execute(
+                """SELECT source_link FROM jobs
+                   WHERE status IN ('pending','running')
+                     AND source_link IS NOT NULL
+                     AND LOWER(source_link) LIKE ?""",
+                (f"%t.me/{needle}/%",),
+            ).fetchall()
+        for row in rows:
+            m = re.search(r"/(\d+)(?:/?$)", str(row["source_link"] or ""))
+            if m:
+                ids.add(int(m.group(1)))
+        return ids
+
+    def find_channel_link_job(self, url: str, *, statuses: tuple[str, ...] = ('pending', 'running', 'completed')) -> int | None:
+        """Return newest job id for this exact channel URL in the given statuses."""
+        link = (url or "").strip()
+        if not link:
+            return None
+        placeholders = ",".join("?" for _ in statuses)
+        with self.connect() as db:
+            row = db.execute(
+                f"""SELECT id FROM jobs
+                    WHERE source='channel-link'
+                      AND source_link=?
+                      AND status IN ({placeholders})
+                    ORDER BY id DESC LIMIT 1""",
+                (link, *statuses),
+            ).fetchone()
+        return int(row["id"]) if row else None
+
+    def dedupe_channel_queue(self) -> dict[str, int]:
+        """Remove duplicate pending channel-link jobs for the same URL.
+
+        Keeps one active job per source_link (prefer running, else oldest pending).
+        Drops pending copies when a completed job already exists for that URL.
+        Never deletes a currently running job.
+        """
+        with self.connect() as db:
+            rows = list(db.execute(
+                """SELECT id, source_link, status FROM jobs
+                   WHERE source='channel-link'
+                     AND source_link IS NOT NULL AND TRIM(source_link) != ''
+                     AND status IN ('pending','running','completed')
+                   ORDER BY id ASC"""
+            ))
+        by_link: dict[str, list[tuple[int, str]]] = {}
+        for row in rows:
+            url = str(row["source_link"]).strip()
+            by_link.setdefault(url, []).append((int(row["id"]), str(row["status"])))
+
+        delete_ids: list[int] = []
+        for url, items in by_link.items():
+            completed = [jid for jid, st in items if st == "completed"]
+            running = [jid for jid, st in items if st == "running"]
+            pending = [jid for jid, st in items if st == "pending"]
+            if completed:
+                delete_ids.extend(pending)
+                continue
+            keep: int | None = running[0] if running else (pending[0] if pending else None)
+            if keep is None:
+                continue
+            for jid in pending:
+                if jid != keep:
+                    delete_ids.append(jid)
+
+        removed = 0
+        if delete_ids:
+            with self.connect() as db:
+                for jid in delete_ids:
+                    db.execute("DELETE FROM extracted_credentials WHERE job_id=?", (jid,))
+                    cur = db.execute("DELETE FROM jobs WHERE id=? AND status='pending'", (jid,))
+                    removed += int(cur.rowcount)
+        return {"removed": removed, "links": len(by_link), "candidates": len(delete_ids)}
 
     def output_for_job(self,job_id,kind):
         if kind not in {"report", "summary"}:

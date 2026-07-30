@@ -62,7 +62,8 @@ Open `http://localhost:8000`. Local HTTP cookies work when no `X-Forwarded-Proto
 
 The same process runs Uvicorn, Telethon, the download supervisor, and extraction workers. Do not launch `uvicorn` separately.
 
-`INGEST_WORKERS` controls parallel Telegram downloads (default `3`, maximum `8`).
+`INGEST_WORKERS` controls parallel Telegram downloads **per online session** (default `3`, maximum `16`).
+Total capacity is `INGEST_WORKERS × online sessions` (for example 10 × 3 accounts = 30).
 Use a lower value if Telegram returns flood-wait errors or storage bandwidth is limited.
 
 ## Dashboard use

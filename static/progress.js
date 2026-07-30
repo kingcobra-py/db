@@ -3,8 +3,8 @@
 (function () {
   "use strict";
 
-  var POLL_MS = 1500;
-  var ACTIVE = { pending: true, running: true };
+  var POLL_MS = 2000;
+  var lastStats = null;
 
   function human(bytes) {
     var n = Number(bytes) || 0;
@@ -17,26 +17,43 @@
     return n.toFixed(1) + " " + units[index];
   }
 
-  function activeRows() {
-    return Array.prototype.filter.call(document.querySelectorAll("tr[data-job-id]"), function (row) {
-      return Boolean(ACTIVE[row.getAttribute("data-job-status")]);
+  function rowById(id) {
+    return document.querySelector('tr[data-job-id="' + id + '"]');
+  }
+
+  function updateStatCards(stats) {
+    if (!stats) return;
+    ["pending", "running", "completed", "failed"].forEach(function (key) {
+      var card = document.querySelector('.stat[data-job-filter="' + key + '"] strong');
+      if (card && stats[key] != null) card.textContent = String(stats[key]);
     });
+  }
+
+  function displayPhase(data) {
+    var stage = String(data.stage || "").toLowerCase();
+    if (data.status === "completed") return "completed";
+    if (data.status === "failed") return "failed";
+    if (stage === "queued" || stage === "fetching" || stage === "downloading") return "downloading";
+    if (stage === "extracting" || stage === "scanning" || data.status === "running") return "extracting";
+    return "pending";
+  }
+
+  function phaseLabel(phase) {
+    if (phase === "completed") return "Successful";
+    if (phase === "failed") return "Failed";
+    if (phase === "downloading") return "Downloading";
+    if (phase === "extracting") return "Extracting";
+    return "Pending";
   }
 
   function updateStatus(row, data) {
     var badge = row.querySelector(".status");
     if (!badge) return;
-    var stage = data.stage || "";
-    var state =
-      data.status === "completed"
-        ? "completed"
-        : data.status === "failed"
-          ? "failed"
-          : data.status === "running" || stage === "fetching" || stage === "downloading"
-            ? "running"
-            : "pending";
-    badge.className = "status " + state;
-    badge.textContent = state === "completed" ? "Successful" : state.charAt(0).toUpperCase() + state.slice(1);
+    var phase = displayPhase(data);
+    badge.className = "status " + phase;
+    badge.textContent = phaseLabel(phase);
+    row.setAttribute("data-job-status", data.status || row.getAttribute("data-job-status") || "");
+    row.setAttribute("data-job-stage", String(data.stage || "").toLowerCase());
   }
 
   function renderProgress(row, data) {
@@ -44,14 +61,18 @@
     var box = row.querySelector("[data-progress]");
     if (!box) return;
 
-    var stage = data.stage || "";
+    var stage = String(data.stage || "").toLowerCase();
+    var phase = displayPhase(data);
     var active =
+      phase === "pending" ||
+      phase === "downloading" ||
+      phase === "extracting" ||
       data.status === "pending" ||
-      data.status === "running" ||
-      stage === "downloading" ||
-      stage === "queued" ||
-      stage === "fetching";
-    if (!active) return;
+      data.status === "running";
+    if (!active) {
+      box.hidden = true;
+      return;
+    }
 
     box.hidden = false;
     box.classList.remove("is-complete", "is-failed");
@@ -59,7 +80,12 @@
     var fill = box.querySelector(".dl-bar > i");
     var label = box.querySelector(".dl-label");
     var percent = Math.max(0, Math.min(100, Number(data.percent) || 0));
-    var indeterminate = stage === "queued" || stage === "fetching" || !(Number(data.total) > 0);
+    var indeterminate =
+      stage === "queued" ||
+      stage === "fetching" ||
+      stage === "extracting" ||
+      stage === "scanning" ||
+      !(Number(data.total) > 0);
     box.classList.toggle("is-indeterminate", indeterminate);
     if (fill && !indeterminate) fill.style.width = percent + "%";
 
@@ -69,26 +95,103 @@
       return;
     }
     if (stage === "fetching") {
-      label.textContent = "Running — fetching Telegram message…";
+      label.textContent = "Downloading — fetching Telegram message…";
       return;
     }
     var filename = data.file || "file";
     var position = data.index && data.count ? " (" + data.index + "/" + data.count + ")" : "";
     if (stage === "downloading" && Number(data.total) > 0) {
       label.textContent =
-        "Running — " + filename + position + " · " + percent + "% · " + human(data.done) + " / " + human(data.total);
+        "Downloading — " + filename + position + " · " + percent + "% · " + human(data.done) + " / " + human(data.total);
       return;
     }
-    if (data.status === "running") {
-      label.textContent = "Running — extracting and scanning…";
+    if (stage === "downloading") {
+      label.textContent = "Downloading — media…";
+      return;
+    }
+    if (stage === "scanning") {
+      label.textContent = "Extracting — scanning credentials…";
+      return;
+    }
+    if (stage === "extracting" || data.status === "running") {
+      label.textContent = "Extracting — unpacking archive…";
       return;
     }
     label.textContent = "Pending — waiting for extraction worker";
   }
 
-  function pollRow(row) {
-    var id = row.getAttribute("data-job-id");
-    return fetch("/jobs/" + encodeURIComponent(id) + "/progress", {
+  function statsChanged(next) {
+    if (!lastStats || !next) return false;
+    return (
+      lastStats.pending !== next.pending ||
+      lastStats.running !== next.running ||
+      lastStats.completed !== next.completed ||
+      lastStats.failed !== next.failed
+    );
+  }
+
+  function sessionMeta(session) {
+    var bits = [];
+    if (session.username) bits.push("@" + session.username);
+    bits.push(session.online ? "Online" : "Offline");
+    if (session.active_jobs) bits.push(session.active_jobs + " active");
+    if (session.last_error) bits.push(session.last_error);
+    return bits.join(" · ");
+  }
+
+  function updateSessions(sessions) {
+    var chips = document.querySelector("[data-session-chips]");
+    var list = document.querySelector("[data-session-list]");
+    if (!chips && !list) return;
+
+    if (chips) {
+      if (!sessions.length) {
+        chips.innerHTML =
+          '<span class="session-chip is-empty"><i class="session-dot is-offline" aria-hidden="true"></i><span class="session-name">No sessions</span></span>';
+      } else {
+        chips.innerHTML = sessions
+          .map(function (session) {
+            var title = session.last_error
+              ? session.last_error
+              : session.online
+                ? "Online"
+                : "Offline";
+            var cls = session.online ? "is-online" : "is-offline";
+            var name = session.display_name || session.label || "Account";
+            return (
+              '<span class="session-chip" data-session-id="' +
+              String(session.id || "") +
+              '" title="' +
+              String(title).replace(/"/g, "&quot;") +
+              '"><i class="session-dot ' +
+              cls +
+              '" aria-hidden="true"></i><span class="session-name">' +
+              String(name).replace(/</g, "&lt;") +
+              "</span></span>"
+            );
+          })
+          .join("");
+      }
+    }
+
+    if (!list) return;
+    sessions.forEach(function (session) {
+      var row = list.querySelector('[data-session-id="' + session.id + '"]');
+      if (!row) return;
+      var dot = row.querySelector(".session-dot");
+      var name = row.querySelector("[data-session-name]");
+      var small = row.querySelector("small");
+      if (dot) {
+        dot.classList.toggle("is-online", !!session.online);
+        dot.classList.toggle("is-offline", !session.online);
+      }
+      if (name) name.textContent = session.display_name || session.label || "Account";
+      if (small) small.textContent = sessionMeta(session);
+    });
+  }
+
+  function pulse() {
+    return fetch("/dashboard/pulse", {
       credentials: "same-origin",
       headers: { Accept: "application/json" }
     })
@@ -97,51 +200,68 @@
         return response.json();
       })
       .then(function (data) {
-        renderProgress(row, data);
-        var originalStatus = row.getAttribute("data-job-status");
-        return data.status && data.status !== originalStatus ? "changed" : "ok";
+        updateStatCards(data.stats);
+        updateSessions(data.sessions || []);
+        var terminalChange = false;
+        (data.jobs || []).forEach(function (job) {
+          var row = rowById(job.id);
+          if (!row) {
+            // A newly active job is not in the current DOM slice — refresh once.
+            terminalChange = true;
+            return;
+          }
+          var previous = row.getAttribute("data-job-status");
+          renderProgress(row, job);
+          if (job.status && previous && job.status !== previous && (job.status === "completed" || job.status === "failed")) {
+            terminalChange = true;
+          }
+        });
+        if (lastStats && statsChanged(data.stats) && (data.stats.completed > lastStats.completed || data.stats.failed > lastStats.failed)) {
+          terminalChange = true;
+        }
+        lastStats = data.stats || lastStats;
+        if (terminalChange) {
+          window.location.reload();
+          return;
+        }
+        window.setTimeout(pulse, POLL_MS);
       })
       .catch(function () {
-        return "ok";
+        window.setTimeout(pulse, POLL_MS * 2);
       });
   }
 
-  function pollJobs() {
-    var rows = activeRows();
-    if (!rows.length) return;
-    Promise.all(rows.map(pollRow)).then(function (results) {
-      if (results.indexOf("changed") !== -1) {
-        window.location.reload();
-        return;
-      }
-      window.setTimeout(pollJobs, POLL_MS);
-    });
-  }
-
-  function loadScanMetrics() {
-    document.querySelectorAll('tr[data-job-status="completed"]').forEach(function (row) {
-      var jobId = row.getAttribute("data-job-id");
-      fetch("/jobs/" + encodeURIComponent(jobId) + "/scan-metrics", {
-        credentials: "same-origin",
-        headers: { Accept: "application/json" }
+  function loadStorage() {
+    var target = document.querySelector("[data-storage-value]");
+    if (!target) return;
+    fetch("/storage-info", {
+      credentials: "same-origin",
+      headers: { Accept: "application/json" }
+    })
+      .then(function (response) {
+        return response.ok ? response.json() : null;
       })
-        .then(function (response) {
-          return response.ok ? response.json() : null;
-        })
-        .then(function (data) {
-          if (!data) return;
-          var files = document.getElementById("files-" + jobId);
-          var findings = document.getElementById("findings-" + jobId);
-          if (files) files.textContent = String(data.files_scanned != null ? data.files_scanned : "—");
-          if (findings) findings.textContent = String(data.findings != null ? data.findings : "—");
-        })
-        .catch(function () {});
-    });
+      .then(function (data) {
+        if (!data) return;
+        target.innerHTML =
+          String(data.total_human_readable || human(data.total_bytes || 0)) + " <small>used</small>";
+      })
+      .catch(function () {});
   }
 
   function startJobPolling() {
-    pollJobs();
-    loadScanMetrics();
+    var pending = document.querySelector('.stat[data-job-filter="pending"] strong');
+    var running = document.querySelector('.stat[data-job-filter="running"] strong');
+    var completed = document.querySelector('.stat[data-job-filter="completed"] strong');
+    var failed = document.querySelector('.stat[data-job-filter="failed"] strong');
+    lastStats = {
+      pending: pending ? Number(pending.textContent || 0) : 0,
+      running: running ? Number(running.textContent || 0) : 0,
+      completed: completed ? Number(completed.textContent || 0) : 0,
+      failed: failed ? Number(failed.textContent || 0) : 0
+    };
+    loadStorage();
+    pulse();
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", startJobPolling);

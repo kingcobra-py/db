@@ -49,6 +49,8 @@ class Settings:
     dashboard_password: str; dashboard_secret: bytes
     password_encryption_key: bytes
     host: str; port: int; log_level: str
+    cred_alert_bot_token: str
+    cred_alert_chat_id: int | None
 
     @property
     def inbox_dir(self): return self.data_root / "inbox"
@@ -61,6 +63,8 @@ class Settings:
     @property
     def password_store_path(self): return self.data_root / "archive-passwords.enc"
     @property
+    def session_store_path(self): return self.data_root / "telegram-sessions.enc"
+    @property
     def session_file_path(self): return self.data_root / "telegram_session.txt"
     @property
     def session_lock_path(self): return self.data_root / "telegram_session.lock"
@@ -69,6 +73,16 @@ class Settings:
         self.data_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         for path in (self.inbox_dir, self.work_dir, self.output_dir):
             path.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+
+def optional_int(name: str) -> int | None:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer Telegram chat/user ID") from exc
 
 
 def load_settings() -> Settings:
@@ -80,18 +94,22 @@ def load_settings() -> Settings:
         max_download_bytes=non_negative_int("MAX_DOWNLOAD_BYTES", 0),
         # 0 disables expanded-size cap; free disk remains the hard stop.
         max_expanded_bytes=non_negative_int("MAX_EXPANDED_BYTES", 0),
-        max_archive_files=positive_int("MAX_ARCHIVE_FILES", 50_000),
-        max_scan_file_bytes=positive_int("MAX_SCAN_FILE_BYTES", 100 * 1024**2),
+        # 0 disables archive file-count cap; free disk remains the hard stop.
+        max_archive_files=non_negative_int("MAX_ARCHIVE_FILES", 0),
+        # 0 disables per-file scan size cap (needed for large .txt / log dumps).
+        max_scan_file_bytes=non_negative_int("MAX_SCAN_FILE_BYTES", 0),
         max_nesting_depth=positive_int("MAX_NESTING_DEPTH", 3),
         min_free_bytes=positive_int("MIN_FREE_BYTES", 1024**3),
         extraction_timeout_seconds=positive_int("EXTRACTION_TIMEOUT_SECONDS", 1800),
         extraction_workers=min(positive_int("EXTRACTION_WORKERS", 1), 24),
-        # Bounded to reduce Telegram flood-waits and concurrent disk pressure.
-        ingest_workers=min(positive_int("INGEST_WORKERS", 3), 8),
+        # Parallel Telegram downloads per online session (total = this × sessions).
+        ingest_workers=min(positive_int("INGEST_WORKERS", 3), 16),
         fingerprint_key=required("FINGERPRINT_KEY").encode(),
         dashboard_password=required("DASHBOARD_PASSWORD"), dashboard_secret=required("DASHBOARD_SECRET").encode(),
         password_encryption_key=required("PASSWORD_ENCRYPTION_KEY").encode(),
         host=os.getenv("HOST", "0.0.0.0"), port=positive_int("PORT", 8000),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        cred_alert_bot_token=os.getenv("CRED_ALERT_BOT_TOKEN", "").strip(),
+        cred_alert_chat_id=optional_int("CRED_ALERT_CHAT_ID"),
     )
     s.prepare(); return s

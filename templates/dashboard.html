@@ -34,7 +34,12 @@
     <div class="settings-menu-head"><strong>Settings</strong><span>CONTROL</span></div>
     <a class="settings-link" href="/session-regenerate">
       <span class="settings-link-icon" aria-hidden="true">↻</span>
-      <span><strong>Session regenerate</strong><small>Replace the Telegram login session</small></span>
+      <span><strong>Add Telegram account</strong><small>Login with phone to add another session</small></span>
+      <span class="settings-link-arrow" aria-hidden="true">›</span>
+    </a>
+    <a class="settings-link" href="#sessions">
+      <span class="settings-link-icon" aria-hidden="true">◉</span>
+      <span><strong>Session pool</strong><small>Manage online accounts on the dashboard</small></span>
       <span class="settings-link-arrow" aria-hidden="true">›</span>
     </a>
   </div>
@@ -46,6 +51,16 @@
         <span class="brand-copy"><strong>Archive Scanner</strong><span>Telegram security pipeline</span></span>
       </a>
       <div class="top-actions">
+        <div class="session-chips" data-session-chips aria-label="Telegram sessions">
+          {% for session in sessions %}
+            <span class="session-chip" data-session-id="{{ session.id }}" title="{% if session.last_error %}{{ session.last_error }}{% elif session.online %}Online{% else %}Offline{% endif %}">
+              <i class="session-dot {% if session.online %}is-online{% else %}is-offline{% endif %}" aria-hidden="true"></i>
+              <span class="session-name">{{ session.display_name }}</span>
+            </span>
+          {% else %}
+            <span class="session-chip is-empty"><i class="session-dot is-offline" aria-hidden="true"></i><span class="session-name">No sessions</span></span>
+          {% endfor %}
+        </div>
         <span class="live-pill"><i class="live-dot"></i><span>Worker online</span></span>
         <button class="top-settings" type="button" data-settings-toggle aria-label="Open settings" aria-controls="settings-menu" aria-expanded="false">⚙</button>
       </div>
@@ -65,10 +80,18 @@
       {% if error %}<div class="alert error" role="alert">{{ error }}</div>{% endif %}
 
       <section class="stats" aria-label="Job statistics">
-        <article class="stat pending"><span>Pending</span><strong>{{ stats['pending'] }}</strong><small>jobs</small></article>
-        <article class="stat running"><span>Running</span><strong>{{ stats['running'] }}</strong><small>jobs</small></article>
-        <article class="stat completed"><span>Completed</span><strong>{{ stats['completed'] }}</strong><small>jobs</small></article>
-        <article class="stat failed"><span>Failed</span><strong>{{ stats['failed'] }}</strong><small>jobs</small></article>
+        <button type="button" class="stat pending" data-job-filter="pending" aria-pressed="false">
+          <span>Pending</span><strong>{{ stats['pending'] }}</strong><small>jobs</small>
+        </button>
+        <button type="button" class="stat running" data-job-filter="running" aria-pressed="false">
+          <span>Running</span><strong>{{ stats['running'] }}</strong><small>jobs</small>
+        </button>
+        <button type="button" class="stat completed" data-job-filter="completed" aria-pressed="false">
+          <span>Completed</span><strong>{{ stats['completed'] }}</strong><small>jobs</small>
+        </button>
+        <button type="button" class="stat failed" data-job-filter="failed" aria-pressed="false">
+          <span>Failed</span><strong>{{ stats['failed'] }}</strong><small>jobs</small>
+        </button>
       </section>
 
       <div class="layout">
@@ -87,41 +110,85 @@
                   <input class="command-input" id="url" name="url" type="url" inputmode="url" placeholder="https://t.me/channel/100-105" required>
                   <button class="command-submit" type="submit">Queue download</button>
                 </div>
-                <p class="form-help">The connected Telegram account must already have access. Example: <code>channel/100-105</code>.</p>
+                <p class="form-help">Any online Telegram session with channel access can download. Example: <code>channel/100-105</code>.</p>
+              </form>
+              <form method="post" action="/channel-scan" class="queue-form scan-form">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <div class="command-row scan-row">
+                  <span class="prompt" aria-hidden="true">⌕</span>
+                  <input class="command-input" name="channel" type="text" placeholder="channel e.g. lezgsjjs" value="lezgsjjs" required aria-label="Channel username">
+                  <input class="command-input scan-id" name="start_id" type="number" min="1" placeholder="start" aria-label="Start message id">
+                  <input class="command-input scan-id" name="end_id" type="number" min="1" placeholder="end" aria-label="End message id">
+                  <button class="command-submit" type="submit">Scan &amp; queue media</button>
+                </div>
+                <p class="form-help">Finds messages that still have files, skips already completed/pending. Leave start/end blank to scan the latest ~2000.</p>
               </form>
             </div>
           </section>
 
           <section class="panel jobs-panel" id="jobs">
             <div class="panel-head">
-              <div><p class="kicker">02 / Activity</p><h2>Recent jobs</h2><p class="panel-note">Live download and scan status.</p></div>
+              <div>
+                <p class="kicker">02 / Activity</p>
+                <h2>Recent jobs</h2>
+                <p class="panel-note">Live download and scan status. Up to 500 jobs; scroll this list only.</p>
+                <p class="panel-note filter-hint" data-filter-hint hidden></p>
+              </div>
               <div class="panel-head-actions">
                 <button class="ghost refresh" type="button">Refresh</button>
+                <form method="post" action="/jobs/retry-failed" class="retry-failed-form" data-confirm="Re-queue all retryable failed downloads for this filter? Deleted/missing messages are skipped.">
+                  <input type="hidden" name="csrf" value="{{ csrf }}">
+                  <input class="command-input retry-channel" name="channel" type="text" placeholder="channel e.g. lezgsjjs" value="lezgsjjs" aria-label="Channel filter for retry">
+                  <button class="ghost" type="submit">Retry failed</button>
+                </form>
                 <form method="post" action="/jobs/stop-all" data-confirm="Stop ALL running and pending jobs? This cannot be undone.">
                   <input type="hidden" name="csrf" value="{{ csrf }}">
                   <button class="danger" type="submit">Stop active</button>
                 </form>
+                <form method="post" action="/jobs/delete-all" data-confirm="Delete ALL recent jobs from the dashboard? This cannot be undone.">
+                  <input type="hidden" name="csrf" value="{{ csrf }}">
+                  <button class="danger" type="submit">Delete all</button>
+                </form>
               </div>
             </div>
-            <div class="table-wrap">
+            <div class="table-wrap" data-jobs-scroll>
               <table>
                 <thead><tr><th>Job</th><th>Source</th><th>Status</th><th>Created</th><th>Output</th></tr></thead>
-                <tbody>
+                <tbody data-jobs-body>
                 {% for job in jobs %}
-                  {% set display_status = 'running' if job.status == 'running' or job.progress_stage in ['fetching', 'downloading'] else job.status %}
-                  <tr data-job-id="{{ job.id }}" data-job-status="{{ job.status }}">
+                  {% set stage = (job.progress_stage or '')|lower %}
+                  {% if job.status == 'completed' %}
+                    {% set display_status = 'completed' %}
+                    {% set display_label = 'Successful' %}
+                  {% elif job.status == 'failed' %}
+                    {% set display_status = 'failed' %}
+                    {% set display_label = 'Failed' %}
+                  {% elif stage in ['queued', 'fetching', 'downloading'] %}
+                    {% set display_status = 'downloading' %}
+                    {% set display_label = 'Downloading' %}
+                  {% elif stage in ['extracting', 'scanning'] or job.status == 'running' %}
+                    {% set display_status = 'extracting' %}
+                    {% set display_label = 'Extracting' %}
+                  {% else %}
+                    {% set display_status = 'pending' %}
+                    {% set display_label = 'Pending' %}
+                  {% endif %}
+                  <tr data-job-id="{{ job.id }}" data-job-status="{{ job.status }}" data-job-stage="{{ stage }}">
                     <td><b>#{{ job.id }}</b><small>Message {{ job.message_id }}</small></td>
                     <td>{{ job.source }}</td>
                     <td>
-                      <span class="status {{ display_status }}">{{ 'Successful' if display_status == 'completed' else display_status|capitalize }}</span>
+                      <span class="status {{ display_status }}">{{ display_label }}</span>
                       {% if job.error %}<small class="error-text" title="{{ job.error }}">{{ job.error }}</small>{% endif %}
-                      <div class="dl-progress {% if display_status in ['pending', 'running'] %}is-indeterminate{% endif %}" data-progress {% if display_status not in ['pending', 'running'] %}hidden{% endif %}>
+                      <div class="dl-progress {% if display_status in ['pending', 'downloading', 'extracting'] %}is-indeterminate{% endif %}" data-progress {% if display_status not in ['pending', 'downloading', 'extracting'] %}hidden{% endif %}>
                         <div class="dl-bar"><i></i></div>
                         <small class="dl-label">
-                          {% if display_status == 'running' and job.progress_stage == 'fetching' %}Running — fetching Telegram message…
-                          {% elif display_status == 'running' and job.progress_stage == 'downloading' %}Running — downloading media…
-                          {% elif display_status == 'running' %}Running — extracting and scanning…
-                          {% elif job.progress_stage == 'queued' %}Pending — waiting for download worker
+                          {% if stage == 'fetching' %}Downloading — fetching Telegram message…
+                          {% elif stage == 'downloading' %}Downloading — media…
+                          {% elif stage == 'extracting' %}Extracting — unpacking archive…
+                          {% elif stage == 'scanning' %}Extracting — scanning credentials…
+                          {% elif stage == 'queued' %}Pending — waiting for download worker
+                          {% elif display_status == 'extracting' %}Extracting — unpacking archive…
+                          {% elif display_status == 'pending' %}Pending — waiting for worker
                           {% else %}Pending — waiting for worker{% endif %}
                         </small>
                       </div>
@@ -130,15 +197,16 @@
                     <td>
                       {% if job.status == 'completed' %}
                         <div class="job-output">
-                          <small class="metrics">Files: <strong id="files-{{ job.id }}">—</strong> · Findings: <strong id="findings-{{ job.id }}">—</strong></small>
+                          <small class="metrics">Files: <strong id="files-{{ job.id }}">{% if job.metrics and job.metrics.files_scanned is not none %}{{ job.metrics.files_scanned }}{% else %}—{% endif %}</strong> · Findings: <strong id="findings-{{ job.id }}">{% if job.metrics and job.metrics.findings is not none %}{{ job.metrics.findings }}{% else %}—{% endif %}</strong></small>
                           <div><a href="/jobs/{{ job.id }}/report">Report</a><a href="/jobs/{{ job.id }}/summary">JSON</a></div>
                         </div>
                       {% else %}<span class="muted">—</span>{% endif %}
                     </td>
                   </tr>
                 {% else %}
-                  <tr><td colspan="5" class="empty">No jobs yet. Queue a Telegram source to begin.</td></tr>
+                  <tr data-empty-jobs><td colspan="5" class="empty">No jobs yet. Queue a Telegram source to begin.</td></tr>
                 {% endfor %}
+                  <tr data-filter-empty hidden><td colspan="5" class="empty">No jobs match this filter.</td></tr>
                 </tbody>
               </table>
             </div>
@@ -155,10 +223,50 @@
         </div>
 
         <aside class="side-column stack-layout">
+          <section class="panel sessions-panel" id="sessions" aria-label="Telegram sessions">
+            <div class="panel-head"><div><p class="kicker">Accounts</p><h2>Telegram sessions</h2></div><span class="head-icon" aria-hidden="true">◉</span></div>
+            <div class="panel-body">
+              <p class="muted">Add string sessions from different accounts. Green = online, red = offline. Downloads spread across online accounts.</p>
+              <form method="post" action="/sessions" class="stack session-add-form">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <label class="sr-only" for="session-label">Account label</label>
+                <input id="session-label" name="label" type="text" maxlength="64" placeholder="Label (optional)">
+                <label class="sr-only" for="session-string">Telegram string session</label>
+                <textarea id="session-string" name="session_string" rows="3" placeholder="Paste Telegram string session" required></textarea>
+                <button type="submit">Add session</button>
+              </form>
+              <div class="session-list" data-session-list>
+                {% for session in sessions %}
+                  <div class="session-row" data-session-id="{{ session.id }}">
+                    <span class="session-row-main">
+                      <i class="session-dot {% if session.online %}is-online{% else %}is-offline{% endif %}" aria-hidden="true"></i>
+                      <span>
+                        <b data-session-name>{{ session.display_name }}</b>
+                        <small>
+                          {% if session.username %}@{{ session.username }} · {% endif %}
+                          {% if session.online %}Online{% else %}Offline{% endif %}
+                          {% if session.active_jobs %} · {{ session.active_jobs }} active{% endif %}
+                          {% if session.last_error %} · {{ session.last_error }}{% endif %}
+                        </small>
+                      </span>
+                    </span>
+                    <form method="post" action="/sessions/{{ session.id }}/delete" data-confirm="Remove this Telegram session from the pool?">
+                      <input type="hidden" name="csrf" value="{{ csrf }}">
+                      <button class="danger-link" type="submit">Remove</button>
+                    </form>
+                  </div>
+                {% else %}
+                  <div class="empty" data-sessions-empty>No Telegram sessions yet.</div>
+                {% endfor %}
+              </div>
+              <p class="form-help"><a href="/session-regenerate">Or login with phone</a> to create and add a new account.</p>
+            </div>
+          </section>
+
           <section class="panel storage-panel" aria-label="Storage usage">
             <div class="panel-head"><div><p class="kicker">Storage</p><h2>Downloaded archives</h2></div><span class="head-icon" aria-hidden="true">▣</span></div>
             <div class="panel-body">
-              <div class="storage-value">{{ storage_human }} <small>used</small></div>
+              <div class="storage-value" data-storage-value>{{ storage_human }} <small>used</small></div>
               <p class="muted">Compressed archives tracked across all jobs.</p>
               <div class="storage-bar" aria-hidden="true"><span></span></div>
               <form method="post" action="/cleanup-files" data-confirm="Remove ALL downloaded and extracted files? This cannot be undone.">

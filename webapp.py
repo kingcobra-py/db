@@ -7,8 +7,6 @@ import json
 import logging
 import secrets
 import time
-import os
-import aiohttp
 from pathlib import Path
 from urllib.parse import quote_plus
 from typing import Any
@@ -162,11 +160,19 @@ class Dashboard:
             if self.pipeline is not None:
                 ingest = await asyncio.to_thread(self.db.ingest_status)
                 hb = getattr(self.pipeline, '_ingest_worker_heartbeat', 0.0) or 0.0
+                per_session = getattr(self.pipeline, 'ingest_workers', 1)
+                capacity = (
+                    self.pipeline._ingest_capacity()
+                    if hasattr(self.pipeline, '_ingest_capacity')
+                    else per_session
+                )
                 payload.update({
                     'ingest_queued': ingest.get('queued', 0),
                     'ingest_active': ingest.get('active'),
                     'ingest_active_count': ingest.get('active_count', 0),
-                    'ingest_workers': getattr(self.pipeline, 'ingest_workers', 1),
+                    'ingest_workers': per_session,
+                    'ingest_workers_per_session': per_session,
+                    'ingest_capacity': capacity,
                     'ingest_heartbeat_age_s': (None if not hb else round(max(0.0, time.monotonic() - hb), 2)),
                 })
             return payload
@@ -198,13 +204,89 @@ class Dashboard:
             if not self._authorized(request): return RedirectResponse('/login',303)
             if self.pipeline is not None:
                 self.pipeline.kick_ingest()
-            # Show enough rows that Running/Failed jobs are not hidden behind a large range submit.
-            stats=await asyncio.to_thread(self.db.stats); jobs=await asyncio.to_thread(self.db.recent,100)
-            passwords=await asyncio.to_thread(self.passwords.list_masked)
-            storage_bytes=await asyncio.to_thread(self.db.get_total_compressed_size)
-            extraction_workers=await asyncio.to_thread(self.db.get_extraction_workers,self.s.extraction_workers)
-            ingest=await asyncio.to_thread(self.db.ingest_status)
-            return self.templates.TemplateResponse(request=request,name='dashboard.html',context={'stats':stats,'jobs':jobs,'passwords':passwords,'csrf':self._csrf(request),'notice':notice,'error':error,'storage_bytes':storage_bytes,'storage_human':_human(storage_bytes),'extraction_workers':extraction_workers,'ingest':ingest})
+            # Parallel DB reads keep first paint fast; storage size is loaded async by the browser.
+            stats, jobs, passwords, extraction_workers, ingest = await asyncio.gather(
+                asyncio.to_thread(self.db.stats),
+                asyncio.to_thread(self.db.recent, 500),
+                asyncio.to_thread(self.passwords.list_masked),
+                asyncio.to_thread(self.db.get_extraction_workers, self.s.extraction_workers),
+                asyncio.to_thread(self.db.ingest_status),
+            )
+            sessions = []
+            if self.pipeline is not None and hasattr(self.pipeline, 'session_status'):
+                sessions = self.pipeline.session_status()
+            return self.templates.TemplateResponse(
+                request=request,
+                name='dashboard.html',
+                context={
+                    'stats': stats,
+                    'jobs': jobs,
+                    'passwords': passwords,
+                    'sessions': sessions,
+                    'csrf': self._csrf(request),
+                    'notice': notice,
+                    'error': error,
+                    'storage_bytes': 0,
+                    'storage_human': '…',
+                    'extraction_workers': extraction_workers,
+                    'ingest': ingest,
+                },
+            )
+
+        @self.app.get('/dashboard/pulse')
+        async def dashboard_pulse(request: Request):
+            """Lightweight live snapshot used instead of hundreds of per-job polls."""
+            self._require(request)
+            if self.pipeline is not None:
+                self.pipeline.kick_ingest()
+            stats, live = await asyncio.gather(
+                asyncio.to_thread(self.db.stats),
+                asyncio.to_thread(self.db.live_jobs, 40),
+            )
+            sessions = []
+            if self.pipeline is not None and hasattr(self.pipeline, 'session_status'):
+                sessions = self.pipeline.session_status()
+            return {'stats': stats, 'jobs': live, 'sessions': sessions}
+
+        @self.app.get('/sessions')
+        async def list_sessions(request: Request):
+            self._require(request)
+            if self.pipeline is None or not hasattr(self.pipeline, 'session_status'):
+                return []
+            return self.pipeline.session_status()
+
+        @self.app.post('/sessions')
+        async def add_session(
+            request: Request,
+            session_string: str = Form(...),
+            label: str = Form(''),
+            csrf: str = Form(...),
+        ):
+            self._require_post(request, csrf)
+            try:
+                result = await self.pipeline.add_session(session_string, label)
+            except ValueError as exc:
+                return RedirectResponse(f'/?error={quote_plus(str(exc))}', 303)
+            except Exception as exc:
+                LOG.exception('Failed to add Telegram session', extra={'stage': 'session'})
+                return RedirectResponse(f'/?error={quote_plus(f"Add session failed: {exc}")}', 303)
+            name = result.get('display_name') or result.get('label') or 'account'
+            return RedirectResponse(
+                f'/?notice={quote_plus(f"Added Telegram session: {name}")}',
+                303,
+            )
+
+        @self.app.post('/sessions/{session_id}/delete')
+        async def delete_session(session_id: str, request: Request, csrf: str = Form(...)):
+            self._require_post(request, csrf)
+            try:
+                await self.pipeline.remove_session(session_id)
+            except ValueError as exc:
+                return RedirectResponse(f'/?error={quote_plus(str(exc))}', 303)
+            except Exception as exc:
+                LOG.exception('Failed to remove Telegram session', extra={'stage': 'session'})
+                return RedirectResponse(f'/?error={quote_plus(f"Remove session failed: {exc}")}', 303)
+            return RedirectResponse('/?notice=Telegram+session+removed', 303)
 
         @self.app.get('/storage-info')
         async def storage_info(request: Request):
@@ -277,12 +359,54 @@ class Dashboard:
 
             # Queue sequentially via ingest worker to avoid Telegram flood failures.
             # Each URL creates a pending job immediately so it appears in Recent jobs.
+            queued = 0
+            skipped = 0
             for submit_url in urls_to_submit:
-                await self.pipeline.enqueue_channel_link(submit_url)
+                job_id = await self.pipeline.enqueue_channel_link(submit_url)
+                if job_id is None:
+                    skipped += 1
+                else:
+                    queued += 1
 
-            count = len(urls_to_submit)
-            msg = f"Queued {count} download(s)" if count > 1 else "Channel download queued"
-            LOG.info('Channel links accepted', extra={'stage': 'web-ingest', 'count': count})
+            if queued == 0 and skipped:
+                msg = f"Skipped {skipped} duplicate link(s) (already queued or completed)"
+            elif skipped:
+                msg = f"Queued {queued} download(s), skipped {skipped} duplicate(s)"
+            else:
+                msg = f"Queued {queued} download(s)" if queued > 1 else "Channel download queued"
+            LOG.info('Channel links accepted', extra={'stage': 'web-ingest', 'queued': queued, 'skipped': skipped})
+            return RedirectResponse(f'/?notice={quote_plus(msg)}', 303)
+
+        @self.app.post('/channel-scan')
+        async def scan_channel(
+            request: Request,
+            csrf: str = Form(...),
+            channel: str = Form(...),
+            start_id: str = Form(''),
+            end_id: str = Form(''),
+        ):
+            """Scan a channel for messages that still have media and queue them."""
+            self._require_post(request, csrf)
+            if self.pipeline is None:
+                return RedirectResponse(f'/?error={quote_plus("Pipeline not ready")}', 303)
+            try:
+                start = int(start_id.strip()) if start_id.strip() else None
+                end = int(end_id.strip()) if end_id.strip() else None
+            except ValueError:
+                return RedirectResponse(f'/?error={quote_plus("start/end must be numbers")}', 303)
+            try:
+                result = await self.pipeline.scan_channel_media(
+                    channel, start_id=start, end_id=end, enqueue=True,
+                )
+            except Exception as exc:
+                LOG.exception('Channel scan failed', extra={'stage': 'channel-scan'})
+                return RedirectResponse(f'/?error={quote_plus(str(exc))}', 303)
+            msg = (
+                f"Scanned @{result['channel']} {result['start_id']}-{result['end_id']} "
+                f"(latest {result['latest_id']}): found {result['found']} media, "
+                f"queued {result['queued']}"
+                + (f", skipped {result.get('skipped', 0)} duplicate(s)" if result.get('skipped') else "")
+            )
             return RedirectResponse(f'/?notice={quote_plus(msg)}', 303)
 
         @self.app.post('/jobs/stop-all')
@@ -294,6 +418,72 @@ class Dashboard:
             else:
                 count = await asyncio.to_thread(self.db.stop_all_jobs)
             return RedirectResponse(f'/?notice={quote_plus(f"Stopped {count} job(s)")}', 303)
+
+        @self.app.post('/jobs/delete-all')
+        async def delete_all_jobs(request: Request, csrf: str = Form(...)):
+            """Stop active work, then delete every job from Recent jobs."""
+            self._require_post(request, csrf)
+            if hasattr(self.pipeline, 'request_stop_all'):
+                await self.pipeline.request_stop_all()
+            count = await asyncio.to_thread(self.db.delete_all_jobs)
+            LOG.info('Deleted all jobs', extra={'stage': 'control', 'deleted': count})
+            return RedirectResponse(f'/?notice={quote_plus(f"Deleted {count} job(s)")}', 303)
+
+        @self.app.post('/jobs/retry-failed')
+        async def retry_failed_jobs(
+            request: Request,
+            csrf: str = Form(...),
+            channel: str = Form(''),
+        ):
+            """Re-queue failed channel downloads that are worth retrying.
+
+            Skips permanent failures (deleted / missing / no media / no archive).
+            Optional channel filter matches source_link substring (e.g. lezgsjjs).
+            """
+            self._require_post(request, csrf)
+            if self.pipeline is None:
+                return RedirectResponse(f'/?error={quote_plus("Pipeline not ready")}', 303)
+            result = await asyncio.to_thread(self.db.failed_retry_links, channel)
+            urls = result['retry']
+            if not urls:
+                skipped = result['skipped']
+                total = result['total_failed']
+                msg = (
+                    f'No retryable failed jobs'
+                    + (f' for {channel.strip()}' if channel.strip() else '')
+                    + f' ({skipped} permanent / {total} failed skipped)'
+                )
+                return RedirectResponse(f'/?notice={quote_plus(msg)}', 303)
+            queued = 0
+            skipped_dup = 0
+            for url in urls:
+                job_id = await self.pipeline.enqueue_channel_link(url)
+                if job_id is None:
+                    skipped_dup += 1
+                else:
+                    queued += 1
+            LOG.info(
+                'Retrying failed channel links',
+                extra={
+                    'stage': 'web-ingest',
+                    'queued': queued,
+                    'skipped_permanent': result['skipped'],
+                    'skipped_duplicate': skipped_dup,
+                    'channel': (channel or '').strip() or None,
+                },
+            )
+            msg = (
+                f'Requeued {queued} failed download(s)'
+                + (f' for {channel.strip()}' if channel.strip() else '')
+            )
+            extras = []
+            if result['skipped']:
+                extras.append(f'{result["skipped"]} permanent')
+            if skipped_dup:
+                extras.append(f'{skipped_dup} duplicate')
+            if extras:
+                msg += f' (skipped {", ".join(extras)})'
+            return RedirectResponse(f'/?notice={quote_plus(msg)}', 303)
 
         @self.app.get('/jobs/{job_id}/progress')
         async def job_progress(job_id: int,request: Request):
@@ -441,50 +631,22 @@ class Dashboard:
                     raise RuntimeError('Sign-in did not complete')
 
                 new_session = temp_client.session.save()
-                # Persist where the pipeline actually loads from on restart.
-                await asyncio.to_thread(self.pipeline._persist_session_string, new_session)
-
+                me = await temp_client.get_me()
+                label = me.first_name or (f'@{me.username}' if me.username else 'New account')
                 await temp_client.disconnect()
                 request.session.pop('phone_hash', None)
                 request.session.pop('phone_number', None)
 
-                # AUTO-REDEPLOY (optional)
+                # Hot-add into the multi-account pool (also mirrors legacy single-session path).
                 try:
-                    api_token = os.getenv('RAILWAY_API_TOKEN')
-                    service_id = os.getenv('RAILWAY_SERVICE_ID', '').strip()
+                    await self.pipeline.add_session(new_session, label)
+                except ValueError as exc:
+                    # Duplicate account: still refresh the legacy bootstrap file.
+                    await asyncio.to_thread(self.pipeline._persist_session_string, new_session)
+                    return RedirectResponse(f'/?error={quote_plus(str(exc))}', 303)
 
-                    if api_token and service_id:
-                        async with aiohttp.ClientSession() as session:
-                            headers = {'Authorization': f'Bearer {api_token}'}
-                            mutation = f"""
-                            mutation {{
-                              deploymentTrigger(input: {{
-                                serviceId: "{service_id}"
-                              }}) {{
-                                deployment {{
-                                  id
-                                }}
-                              }}
-                            }}
-                            """
-
-                            async with session.post(
-                                'https://api.railway.app/graphql',
-                                json={'query': mutation},
-                                headers=headers,
-                                timeout=aiohttp.ClientTimeout(total=10)
-                            ) as resp:
-                                if resp.status == 200:
-                                    LOG.info('Redeploy triggered', extra={'stage': 'session'})
-                                else:
-                                    LOG.error(f'Redeploy failed: {resp.status}', extra={'stage': 'session'})
-                    elif api_token and not service_id:
-                        LOG.warning('RAILWAY_API_TOKEN set but RAILWAY_SERVICE_ID missing; skip redeploy', extra={'stage': 'session'})
-                except Exception as e:
-                    LOG.error(f'Redeploy error: {e}', extra={'stage': 'session'})
-
-                LOG.info('Telegram session regenerated', extra={'stage': 'session'})
-                notice = 'Session updated. Restart or redeploy the service to apply it.'
+                LOG.info('Telegram session added to pool', extra={'stage': 'session'})
+                notice = f'Added Telegram account: {label}'
                 return RedirectResponse(f'/?notice={quote_plus(notice)}', 303)
 
             except CodeInvalidError:

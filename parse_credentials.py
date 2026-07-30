@@ -38,13 +38,29 @@ PATTERNS = (
 def _fingerprint(value: str, key: bytes) -> str:
     return hmac.new(key, value.encode(), hashlib.sha256).hexdigest()[:16]
 
-def _should_scan_file(path: Path, output_dir: Path | None = None) -> bool:
-    if not path.is_file():
+def _over_size_limit(size: int, max_file_bytes: int) -> bool:
+    """Return True when a positive size cap is set and the file exceeds it. 0 = unlimited."""
+    return max_file_bytes > 0 and size > max_file_bytes
+
+def _is_aws_credentials_target(path: Path) -> bool:
+    """Only AWS credentials files under Soft/Azure or Applications/Azure trees."""
+    if not path.is_file() or path.name.lower() != "credentials":
         return False
-    valid_extensions = {'.txt', '.csv', '.log', '.conf', '.json', '.yaml', '.yml', ''}
-    file_ext = path.suffix.lower()
-    file_name = path.name.lower()
-    if file_ext not in valid_extensions and file_name != 'credentials':
+    parent_lower = str(path.parent).lower()
+    # Old pattern: .../Soft/.../Azure/.../aws/.../credentials
+    pola_lama = "soft" in parent_lower and "azure" in parent_lower and "aws" in parent_lower
+    # New: .../Applications/.../Azure/.../.aws/.../credentials
+    pola_baru_1 = (
+        "applications" in parent_lower
+        and "azure" in parent_lower
+        and ".aws" in parent_lower
+    )
+    # New: .../Applications/.../Azure/.../credentials
+    pola_baru_2 = "applications" in parent_lower and "azure" in parent_lower
+    return pola_lama or pola_baru_1 or pola_baru_2
+
+def _should_scan_file(path: Path, output_dir: Path | None = None) -> bool:
+    if not _is_aws_credentials_target(path):
         return False
     if output_dir is not None:
         try:
@@ -54,72 +70,94 @@ def _should_scan_file(path: Path, output_dir: Path | None = None) -> bool:
             pass
     return True
 
-def _count_scannable_files(root: Path, max_file_bytes: int, output_dir: Path | None = None) -> int:
-    count = 0
+def _iter_credential_files(root: Path, output_dir: Path | None = None):
+    """Yield only matching AWS credentials files (never Passwords.txt / random logs)."""
     root = root.resolve()
     try:
-        for path in root.rglob("*"):
-            if _should_scan_file(path, output_dir):
-                if path.stat().st_size <= max_file_bytes:
-                    count += 1
+        candidates = root.rglob("credentials")
+    except OSError:
+        return
+    for path in candidates:
+        if not _should_scan_file(path, output_dir):
+            continue
+        yield path
+
+def _count_scannable_files(root: Path, max_file_bytes: int, output_dir: Path | None = None) -> int:
+    count = 0
+    try:
+        for path in _iter_credential_files(root, output_dir):
+            if not _over_size_limit(path.stat().st_size, max_file_bytes):
+                count += 1
     except Exception:
         pass
     return count
+
+def _iter_lines(path: Path):
+    """Stream text lines without loading the whole file into memory."""
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line_no, line in enumerate(handle, 1):
+            yield line_no, line.rstrip("\n\r")
 
 def _scan_file(path: Path, root: Path, max_file_bytes: int, fingerprint_key: bytes) -> Tuple[List[dict], str]:
     findings = []
     rel_path = str(path.relative_to(root))
     debug_info = f"{rel_path}"
-    
+
     try:
-        if path.stat().st_size > max_file_bytes:
+        size = path.stat().st_size
+        if _over_size_limit(size, max_file_bytes):
             return findings, debug_info + " → SKIPPED"
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        hits = 0
+        for line_no, line in _iter_lines(path):
+            for pattern, kind, group in PATTERNS:
+                for match in pattern.finditer(line):
+                    secret = match.group(group)
+                    findings.append({
+                        "type": kind,
+                        "file": rel_path,
+                        "line": line_no,
+                        "fingerprint": _fingerprint(secret, fingerprint_key),
+                    })
+                    hits += 1
     except Exception as e:
         return findings, debug_info + f" → ERROR: {str(e)[:30]}"
-    
-    hits = 0
-    for line_no, line in enumerate(lines, 1):
-        for pattern, kind, group in PATTERNS:
-            for match in pattern.finditer(line):
-                secret = match.group(group)
-                findings.append({
-                    "type": kind,
-                    "file": rel_path,
-                    "line": line_no,
-                    "fingerprint": _fingerprint(secret, fingerprint_key),
-                })
-                hits += 1
-    
+
     if hits:
         return findings, debug_info + f" → HIT ({hits})"
-    else:
-        return findings, debug_info + " → NO_CRED"
+    return findings, debug_info + " → NO_CRED"
 
 def scan_tree(root: Path, max_file_bytes: int, fingerprint_key: bytes, max_workers: int = 8, output_dir: Path | None = None):
     findings: List[dict] = []
     root = root.resolve()
-    
+
     scannable_count = _count_scannable_files(root, max_file_bytes, output_dir)
     LOG.info(f'Starting credential scan on {scannable_count} scannable files', extra={'stage': 'scanning', 'scannable_files': scannable_count})
     debug_log(f"SCAN START: {scannable_count} files in {root.name}", "START")
-    
+
     file_paths = []
-    for path in root.rglob("*"):
-        if _should_scan_file(path, output_dir):
-            file_paths.append(path)
-    
+    for path in _iter_credential_files(root, output_dir):
+        try:
+            if _over_size_limit(path.stat().st_size, max_file_bytes):
+                continue
+        except OSError:
+            continue
+        file_paths.append(path)
+
     files_scanned = 0
-    
+    files_skipped = 0
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_scan_file, fp, root, max_file_bytes, fingerprint_key): fp for fp in file_paths}
-        
+
         for future in as_completed(futures):
             try:
                 file_findings, info = future.result()
+                if "SKIPPED" in info:
+                    files_skipped += 1
+                    continue
                 findings.extend(file_findings)
                 files_scanned += 1
-                
+
                 if "HIT" in info:
                     debug_log(info, "HIT")
                 elif "ERROR" in info:
@@ -128,31 +166,32 @@ def scan_tree(root: Path, max_file_bytes: int, fingerprint_key: bytes, max_worke
                     debug_log(info, "NO_CRED")
             except Exception as e:
                 debug_log(f"Thread error: {e}", "ERROR")
-    
+
     summary = {
         "files_scanned": files_scanned,
+        "files_skipped": files_skipped,
         "findings": len(findings),
         "by_type": {kind: sum(1 for f in findings if f["type"] == kind) for _, kind, _ in PATTERNS},
     }
-    
+
     debug_log(f"SCAN DONE: {files_scanned} files, {len(findings)} findings", "SUMMARY")
-    LOG.info(f'Scan complete: {files_scanned} files scanned, {len(findings)} total findings', 
+    LOG.info(f'Scan complete: {files_scanned} files scanned, {len(findings)} total findings',
              extra={'stage': 'scanning', 'files_scanned': files_scanned, 'findings': len(findings)})
-    
+
     return findings, summary
 
 def write_results(out_dir: Path, message_id: int, findings, summary):
     out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     text_path = out_dir / f"report-{message_id}.txt"
     json_path = out_dir / f"summary-{message_id}.json"
-    
+
     lines = [f"Files scanned: {summary['files_scanned']}", f"Findings: {summary['findings']}", ""]
     for kind, n in summary["by_type"].items():
         lines.append(f"  {kind}: {n}")
     lines.append("")
     for f in findings:
         lines.append(f"[{f['type']}] {f['file']}:{f['line']} fingerprint={f['fingerprint']}")
-    
+
     text_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     json_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return text_path, json_path
@@ -162,12 +201,12 @@ def write_raw_credentials_file(credentials: List[dict], output_path: Path):
     lines_set: Set[str] = set()
     for cred in credentials:
         lines_set.add(f"{cred['access_key']}:{cred['secret_key']}:{cred['region']}")
-    
+
     output_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with open(output_path, "w", encoding="utf-8") as f:
         for line in sorted(lines_set):
             f.write(line + "\n")
-    
+
     debug_log(f"Raw credentials exported: {output_path} ({len(lines_set)} entries)", "RESULT")
     LOG.info(f"Raw credentials written: {len(lines_set)} unique credentials", extra={'stage': 'export', 'count': len(lines_set)})
 
@@ -204,7 +243,12 @@ def _pair_key_secret(keys: list[tuple[int, str, str]], secrets: list[tuple[int, 
         })
     return local_creds
 
-def extract_raw_credentials(root: Path, max_workers: int = 8, output_dir: Path | None = None) -> List[dict]:
+def extract_raw_credentials(
+    root: Path,
+    max_workers: int = 8,
+    output_dir: Path | None = None,
+    max_file_bytes: int = 0,
+) -> List[dict]:
     creds_dict: Dict[str, dict] = {}
     region_pattern = re.compile(
         r'\b(us-east-1|us-east-2|us-west-1|us-west-2|eu-west-1|eu-west-2|eu-central-1|'
@@ -212,42 +256,42 @@ def extract_raw_credentials(root: Path, max_workers: int = 8, output_dir: Path |
         r'ca-central-1|sa-east-1|us-gov-west-1|us-gov-east-1|cn-north-1|cn-northwest-1)\b',
         re.IGNORECASE
     )
-    
+
     root = root.resolve()
     files_with_creds: Set[str] = set()
     region_counts: Dict[str, int] = {}
-    
+
     file_paths = []
-    for path in root.rglob("*"):
-        if _should_scan_file(path, output_dir) and path.stat().st_size <= 1024 * 1024:
-            file_paths.append(path)
-    
+    for path in _iter_credential_files(root, output_dir):
+        try:
+            if _over_size_limit(path.stat().st_size, max_file_bytes):
+                continue
+        except OSError:
+            continue
+        file_paths.append(path)
+
     scannable_count = len(file_paths)
-    LOG.info(f'Starting raw credential extraction on {scannable_count} files', 
+    LOG.info(f'Starting raw credential extraction on {scannable_count} files',
              extra={'stage': 'credential-extraction', 'scannable_files': scannable_count})
     debug_log(f"EXTRACT START: {scannable_count} files", "START")
-    
+
     def _process_one(filepath: Path):
         rel_path = str(filepath.relative_to(root))
         try:
-            lines = filepath.read_text(encoding="utf-8", errors="replace").splitlines()
+            keys_in_file = []
+            secrets_in_file = []
+            for line_no, line in _iter_lines(filepath):
+                for match in AWS_ID.finditer(line):
+                    keys_in_file.append((line_no, match.group(1), line))
+                for match in AWS_SECRET.finditer(line):
+                    secrets_in_file.append((line_no, match.group(2), line))
+            return _pair_key_secret(keys_in_file, secrets_in_file, region_pattern, rel_path)
         except Exception:
             return []
-        
-        keys_in_file = []
-        secrets_in_file = []
-        
-        for line_no, line in enumerate(lines, 1):
-            for match in AWS_ID.finditer(line):
-                keys_in_file.append((line_no, match.group(1), line))
-            for match in AWS_SECRET.finditer(line):
-                secrets_in_file.append((line_no, match.group(2), line))
-        
-        return _pair_key_secret(keys_in_file, secrets_in_file, region_pattern, rel_path)
-    
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_process_one, fp): fp for fp in file_paths}
-        
+
         for future in as_completed(futures):
             try:
                 creds_from_file = future.result()
@@ -261,12 +305,12 @@ def extract_raw_credentials(root: Path, max_workers: int = 8, output_dir: Path |
                         debug_log(f"Found credential: {key[:8]}... → {region}", "HIT")
             except Exception as e:
                 debug_log(f"Extract error: {e}", "ERROR")
-    
+
     result = list(creds_dict.values())
     regions_str = ", ".join(f"{r}({c})" for r, c in sorted(region_counts.items()))
     debug_log(f"EXTRACT DONE: {len(result)} credentials from {len(files_with_creds)} files. Regions: {regions_str}", "SUMMARY")
     LOG.info(f'Credential extraction complete: {len(result)} credentials from {len(files_with_creds)} files. Regions: {region_counts}',
-             extra={'stage': 'credential-extraction', 'credentials_found': len(result), 
+             extra={'stage': 'credential-extraction', 'credentials_found': len(result),
                     'files_with_creds': len(files_with_creds), 'region_distribution': region_counts})
-    
+
     return result
