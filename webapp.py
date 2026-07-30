@@ -116,8 +116,8 @@ class Dashboard:
             if start > end:
                 raise ValueError('Range start must be <= end')
 
-            if end - start + 1 > 500:
-                raise ValueError('Range too large (max 500 messages at once)')
+            if end - start + 1 > 1000:
+                raise ValueError('Range too large (max 1000 messages at once)')
 
             # Build base URL
             base_parts = parts[:-1]
@@ -207,7 +207,7 @@ class Dashboard:
             # Parallel DB reads keep first paint fast; storage size is loaded async by the browser.
             stats, jobs, passwords, extraction_workers, ingest = await asyncio.gather(
                 asyncio.to_thread(self.db.stats),
-                asyncio.to_thread(self.db.recent, 500),
+                asyncio.to_thread(self.db.recent, 1000),
                 asyncio.to_thread(self.passwords.list_masked),
                 asyncio.to_thread(self.db.get_extraction_workers, self.s.extraction_workers),
                 asyncio.to_thread(self.db.ingest_status),
@@ -241,7 +241,7 @@ class Dashboard:
                 self.pipeline.kick_ingest()
             stats, live = await asyncio.gather(
                 asyncio.to_thread(self.db.stats),
-                asyncio.to_thread(self.db.live_jobs, 40),
+                asyncio.to_thread(self.db.live_jobs, 1000),
             )
             sessions = []
             if self.pipeline is not None and hasattr(self.pipeline, 'session_status'):
