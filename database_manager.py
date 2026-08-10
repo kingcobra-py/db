@@ -822,6 +822,33 @@ class DatabaseManager:
                 for r in cursor
             ]
 
+    def count_credit_cards(self) -> int:
+        with self.connect() as db:
+            return int(db.execute('SELECT COUNT(*) FROM extracted_credit_cards').fetchone()[0])
+
+    def get_credit_cards(self, limit: int = 1000) -> tuple[list, int]:
+        with self.connect() as db:
+            total = int(db.execute('SELECT COUNT(*) FROM extracted_credit_cards').fetchone()[0])
+            cursor = db.execute(
+                '''SELECT card_number, exp_month, exp_year, cvv, file_path, line_number, created_at, job_id
+                   FROM extracted_credit_cards ORDER BY created_at DESC LIMIT ?''',
+                (max(1, int(limit)),),
+            )
+            cards = [
+                {
+                    'card_number': r[0],
+                    'exp_month': r[1] or '',
+                    'exp_year': r[2] or '',
+                    'cvv': r[3] or '',
+                    'file_path': r[4] or '',
+                    'line_number': r[5] or 0,
+                    'created_at': r[6],
+                    'job_id': r[7],
+                }
+                for r in cursor
+            ]
+            return cards, total
+
     def clear_all_credit_cards(self) -> int:
         with self.connect() as db:
             cursor = db.execute('DELETE FROM extracted_credit_cards')

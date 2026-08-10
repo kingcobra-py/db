@@ -397,10 +397,14 @@
     if (clearButton) clearButton.disabled = !enabled;
   }
 
-  function renderCreditCards(cards) {
+  function renderCreditCards(payload) {
     var container = document.getElementById("credit-cards-list");
     if (!container) return;
     container.replaceChildren();
+
+    var cards = payload && payload.cards ? payload.cards : payload;
+    var total = payload && payload.total != null ? payload.total : (Array.isArray(cards) ? cards.length : 0);
+    var showing = payload && payload.showing != null ? payload.showing : (Array.isArray(cards) ? cards.length : 0);
 
     if (!Array.isArray(cards) || cards.length === 0) {
       var empty = document.createElement("div");
@@ -409,6 +413,13 @@
       container.appendChild(empty);
       setCreditCardActions(false);
       return;
+    }
+
+    if (total > showing) {
+      var note = document.createElement("div");
+      note.className = "empty";
+      note.textContent = "Showing " + showing + " of " + total + " cards (most recent first). Export downloads all.";
+      container.appendChild(note);
     }
 
     cards.forEach(function (card) {
@@ -431,8 +442,8 @@
       .then(function (response) {
         return response.ok ? response.json() : null;
       })
-      .then(function (cards) {
-        if (cards) renderCreditCards(cards);
+      .then(function (payload) {
+        if (payload) renderCreditCards(payload);
       })
       .catch(function () {});
   }

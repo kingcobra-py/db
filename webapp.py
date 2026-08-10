@@ -555,12 +555,13 @@ class Dashboard:
                             headers={'Content-Disposition': 'attachment; filename=credentials.txt'})
 
         @self.app.get('/credit-cards')
-        async def get_credit_cards(request: Request):
+        async def get_credit_cards(request: Request, limit: int = 1000):
             self._require(request)
-            cards = await asyncio.to_thread(self.db.get_all_credit_cards)
+            limit = max(1, min(int(limit), 5000))
+            cards, total = await asyncio.to_thread(self.db.get_credit_cards, limit)
             for card in cards:
                 card['line'] = format_credit_card_line(card)
-            return cards
+            return {'total': total, 'showing': len(cards), 'cards': cards}
 
         @self.app.post('/credit-cards/clear-all')
         async def clear_credit_cards(request: Request, csrf: str = Form(...)):
