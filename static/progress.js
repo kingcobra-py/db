@@ -382,3 +382,61 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", loadCredentials);
   else loadCredentials();
 })();
+
+(function () {
+  "use strict";
+
+  function setCreditCardActions(enabled) {
+    var exportButton = document.getElementById("credit-cards-export-btn");
+    var clearButton = document.getElementById("credit-cards-clear-btn");
+    if (exportButton) {
+      exportButton.classList.toggle("is-disabled", !enabled);
+      exportButton.setAttribute("aria-disabled", enabled ? "false" : "true");
+      exportButton.tabIndex = enabled ? 0 : -1;
+    }
+    if (clearButton) clearButton.disabled = !enabled;
+  }
+
+  function renderCreditCards(cards) {
+    var container = document.getElementById("credit-cards-list");
+    if (!container) return;
+    container.replaceChildren();
+
+    if (!Array.isArray(cards) || cards.length === 0) {
+      var empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "No credit cards yet.";
+      container.appendChild(empty);
+      setCreditCardActions(false);
+      return;
+    }
+
+    cards.forEach(function (card) {
+      var row = document.createElement("div");
+      row.className = "credential-row";
+      var code = document.createElement("code");
+      code.textContent = String(card.line || "");
+      row.appendChild(code);
+      container.appendChild(row);
+    });
+    setCreditCardActions(true);
+  }
+
+  function loadCreditCards() {
+    if (!document.getElementById("credit-cards-list")) return;
+    fetch("/credit-cards", {
+      credentials: "same-origin",
+      headers: { Accept: "application/json" }
+    })
+      .then(function (response) {
+        return response.ok ? response.json() : null;
+      })
+      .then(function (cards) {
+        if (cards) renderCreditCards(cards);
+      })
+      .catch(function () {});
+  }
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", loadCreditCards);
+  else loadCreditCards();
+})();

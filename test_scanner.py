@@ -8,6 +8,12 @@ from types import SimpleNamespace
 from database_manager import DatabaseManager
 from extractor import ArchiveProcessor, validate_member, sanitize_member, ExtractionError, is_rar
 from parse_credentials import scan_tree, write_results, extract_raw_credentials, _is_aws_credentials_target
+from parse_credit_cards import (
+    extract_credit_cards,
+    format_credit_card_line,
+    write_credit_cards_file,
+    _is_credit_card_target,
+)
 
 
 class SecurityTests(unittest.TestCase):
@@ -425,6 +431,93 @@ class SecurityTests(unittest.TestCase):
             self.assertEqual(claimed["url"], "https://t.me/channel/11")
             progress = db.progress_for_job(download_id)
             self.assertEqual(progress["stage"], "fetching")
+
+    @staticmethod
+    def _write_credit_card_file(root: Path, relative_dir: str, body: str) -> Path:
+        path = root.joinpath(*relative_dir.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def test_credit_card_path_patterns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cc_dir = self._write_credit_card_file(root, "victim/CreditCards/Chrome_Default.txt", "Card: 4111111111111111\n")
+            cc_folder = self._write_credit_card_file(root, "victim/CC/Edge_Default.txt", "Card: 4111111111111111\n")
+            noise = root / "Passwords.txt"
+            noise.write_text("Card: 4111111111111111\n", encoding="utf-8")
+            self.assertTrue(_is_credit_card_target(cc_dir))
+            self.assertTrue(_is_credit_card_target(cc_folder))
+            self.assertFalse(_is_credit_card_target(noise))
+
+    def test_credit_card_stealer_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_credit_card_file(
+                root,
+                "host/CreditCards/Chrome_Default.txt",
+                "\nHolder: Test User\nCardType: Unknown\nCard: 4111111111111111\nExpire: 10/2031\nCVV: 123\n",
+            )
+            cards = extract_credit_cards(root)
+            self.assertEqual(len(cards), 1)
+            self.assertEqual(cards[0]["card_number"], "4111111111111111")
+            self.assertEqual(cards[0]["exp_month"], "10")
+            self.assertEqual(cards[0]["exp_year"], "2031")
+            self.assertEqual(cards[0]["cvv"], "123")
+            self.assertEqual(format_credit_card_line(cards[0]), "4111111111111111|10|2031|123")
+
+    def test_credit_card_pipe_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_credit_card_file(
+                root,
+                "host/CC/Chrome_Default.txt",
+                "4111111111111111|03|2028|456\n",
+            )
+            cards = extract_credit_cards(root)
+            self.assertEqual(len(cards), 1)
+            self.assertEqual(format_credit_card_line(cards[0]), "4111111111111111|03|2028|456")
+
+    def test_credit_card_db_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            job_id = db.create_job(99, 0, 0, ["pack.zip"])
+            db.save_credit_cards(
+                job_id,
+                [
+                    {
+                        "card_number": "4111111111111111",
+                        "exp_month": "10",
+                        "exp_year": "2031",
+                        "cvv": "123",
+                        "file": "host/CreditCards/Chrome_Default.txt",
+                        "line": 4,
+                    }
+                ],
+            )
+            rows = db.get_all_credit_cards()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["card_number"], "4111111111111111")
+            self.assertEqual(rows[0]["cvv"], "123")
+            db.delete_job(job_id)
+            self.assertEqual(db.get_all_credit_cards(), [])
+
+    def test_credit_card_export_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "cards.txt"
+            write_credit_cards_file(
+                [
+                    {
+                        "card_number": "4111111111111111",
+                        "exp_month": "10",
+                        "exp_year": "2031",
+                        "cvv": "123",
+                    }
+                ],
+                out,
+            )
+            self.assertEqual(out.read_text(encoding="utf-8"), "4111111111111111|10|2031|123\n")
 
 
 if __name__ == "__main__":
