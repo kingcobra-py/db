@@ -123,6 +123,11 @@ class DatabaseManager:
                 id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER, access_key TEXT, 
                 secret_key TEXT, region TEXT, file_path TEXT, line_number INTEGER,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS extracted_credit_cards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER,
+                card_number TEXT NOT NULL, exp_month TEXT, exp_year TEXT, cvv TEXT,
+                file_path TEXT, line_number INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
     def _job(self, r):
         return Job(
@@ -478,6 +483,7 @@ class DatabaseManager:
     def delete_job(self, job_id: int) -> bool:
         with self.connect() as db:
             db.execute("DELETE FROM extracted_credentials WHERE job_id=?", (job_id,))
+            db.execute("DELETE FROM extracted_credit_cards WHERE job_id=?", (job_id,))
             cursor = db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
             return cursor.rowcount > 0
 
@@ -486,6 +492,7 @@ class DatabaseManager:
         with self.connect() as db:
             count = int(db.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()["n"])
             db.execute("DELETE FROM extracted_credentials")
+            db.execute("DELETE FROM extracted_credit_cards")
             db.execute("DELETE FROM jobs")
         return count
 
@@ -648,6 +655,7 @@ class DatabaseManager:
             with self.connect() as db:
                 for jid in delete_ids:
                     db.execute("DELETE FROM extracted_credentials WHERE job_id=?", (jid,))
+                    db.execute("DELETE FROM extracted_credit_cards WHERE job_id=?", (jid,))
                     cur = db.execute("DELETE FROM jobs WHERE id=? AND status='pending'", (jid,))
                     removed += int(cur.rowcount)
         return {"removed": removed, "links": len(by_link), "candidates": len(delete_ids)}
@@ -774,6 +782,49 @@ class DatabaseManager:
     def clear_all_credentials(self) -> int:
         with self.connect() as db:
             cursor = db.execute('DELETE FROM extracted_credentials')
+            return cursor.rowcount
+
+    def save_credit_cards(self, job_id: int, cards: list) -> None:
+        with self.connect() as db:
+            for card in cards:
+                db.execute(
+                    '''INSERT INTO extracted_credit_cards
+                    (job_id, card_number, exp_month, exp_year, cvv, file_path, line_number)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                    (
+                        job_id,
+                        card['card_number'],
+                        card.get('exp_month', ''),
+                        card.get('exp_year', ''),
+                        card.get('cvv', ''),
+                        card.get('file', ''),
+                        card.get('line', 0),
+                    ),
+                )
+
+    def get_all_credit_cards(self) -> list:
+        with self.connect() as db:
+            cursor = db.execute(
+                '''SELECT card_number, exp_month, exp_year, cvv, file_path, line_number, created_at, job_id
+                   FROM extracted_credit_cards ORDER BY created_at DESC'''
+            )
+            return [
+                {
+                    'card_number': r[0],
+                    'exp_month': r[1] or '',
+                    'exp_year': r[2] or '',
+                    'cvv': r[3] or '',
+                    'file_path': r[4] or '',
+                    'line_number': r[5] or 0,
+                    'created_at': r[6],
+                    'job_id': r[7],
+                }
+                for r in cursor
+            ]
+
+    def clear_all_credit_cards(self) -> int:
+        with self.connect() as db:
+            cursor = db.execute('DELETE FROM extracted_credit_cards')
             return cursor.rowcount
 
     def stop_all_jobs(self) -> int:

