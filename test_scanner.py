@@ -519,6 +519,49 @@ class SecurityTests(unittest.TestCase):
             )
             self.assertEqual(out.read_text(encoding="utf-8"), "4111111111111111|10|2031|123\n")
 
+    def test_credit_card_line_formats(self):
+        card = {
+            "card_number": "4111111111111111",
+            "exp_month": "10",
+            "exp_year": "2031",
+            "cvv": "123",
+        }
+        self.assertEqual(format_credit_card_line(card, include_cvv=True), "4111111111111111|10|2031|123")
+        self.assertEqual(format_credit_card_line(card, include_cvv=False), "4111111111111111|10|2031")
+
+    def test_credit_card_cvv_split_queries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            job_id = db.create_job(1, 0, 0, ["pack.zip"])
+            db.save_credit_cards(
+                job_id,
+                [
+                    {
+                        "card_number": "4111111111111111",
+                        "exp_month": "10",
+                        "exp_year": "2031",
+                        "cvv": "123",
+                        "file": "a.txt",
+                        "line": 1,
+                    },
+                    {
+                        "card_number": "5555555555554444",
+                        "exp_month": "01",
+                        "exp_year": "2028",
+                        "cvv": "",
+                        "file": "b.txt",
+                        "line": 2,
+                    },
+                ],
+            )
+            with_cvv, with_total = db.get_credit_cards(100, with_cvv=True)
+            without_cvv, without_total = db.get_credit_cards(100, with_cvv=False)
+            self.assertEqual(with_total, 1)
+            self.assertEqual(without_total, 1)
+            self.assertEqual(with_cvv[0]["card_number"], "4111111111111111")
+            self.assertEqual(without_cvv[0]["card_number"], "5555555555554444")
+
 
 if __name__ == "__main__":
     unittest.main()

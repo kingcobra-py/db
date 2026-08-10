@@ -386,39 +386,41 @@
 (function () {
   "use strict";
 
-  function setCreditCardActions(enabled) {
-    var exportButton = document.getElementById("credit-cards-export-btn");
+  function setExportButton(id, enabled) {
+    var exportButton = document.getElementById(id);
+    if (!exportButton) return;
+    exportButton.classList.toggle("is-disabled", !enabled);
+    exportButton.setAttribute("aria-disabled", enabled ? "false" : "true");
+    exportButton.tabIndex = enabled ? 0 : -1;
+  }
+
+  function setClearButton(enabled) {
     var clearButton = document.getElementById("credit-cards-clear-btn");
-    if (exportButton) {
-      exportButton.classList.toggle("is-disabled", !enabled);
-      exportButton.setAttribute("aria-disabled", enabled ? "false" : "true");
-      exportButton.tabIndex = enabled ? 0 : -1;
-    }
     if (clearButton) clearButton.disabled = !enabled;
   }
 
-  function renderCreditCards(payload) {
-    var container = document.getElementById("credit-cards-list");
-    if (!container) return;
+  function renderCreditCardSection(containerId, exportButtonId, payload, emptyText) {
+    var container = document.getElementById(containerId);
+    if (!container) return false;
     container.replaceChildren();
 
-    var cards = payload && payload.cards ? payload.cards : payload;
-    var total = payload && payload.total != null ? payload.total : (Array.isArray(cards) ? cards.length : 0);
-    var showing = payload && payload.showing != null ? payload.showing : (Array.isArray(cards) ? cards.length : 0);
+    var cards = payload && payload.cards ? payload.cards : [];
+    var total = payload && payload.total != null ? payload.total : cards.length;
+    var showing = payload && payload.showing != null ? payload.showing : cards.length;
 
-    if (!Array.isArray(cards) || cards.length === 0) {
+    if (!cards.length) {
       var empty = document.createElement("div");
       empty.className = "empty";
-      empty.textContent = "No credit cards yet.";
+      empty.textContent = emptyText;
       container.appendChild(empty);
-      setCreditCardActions(false);
-      return;
+      setExportButton(exportButtonId, false);
+      return false;
     }
 
     if (total > showing) {
       var note = document.createElement("div");
       note.className = "empty";
-      note.textContent = "Showing " + showing + " of " + total + " cards (most recent first). Export downloads all.";
+      note.textContent = "Showing " + showing + " of " + total + " (most recent first). Export downloads all.";
       container.appendChild(note);
     }
 
@@ -430,11 +432,28 @@
       row.appendChild(code);
       container.appendChild(row);
     });
-    setCreditCardActions(true);
+    setExportButton(exportButtonId, true);
+    return true;
+  }
+
+  function renderCreditCards(payload) {
+    var hasWith = renderCreditCardSection(
+      "credit-cards-with-cvv-list",
+      "credit-cards-with-cvv-export-btn",
+      payload && payload.with_cvv,
+      "No cards with CVV yet."
+    );
+    var hasWithout = renderCreditCardSection(
+      "credit-cards-without-cvv-list",
+      "credit-cards-without-cvv-export-btn",
+      payload && payload.without_cvv,
+      "No cards without CVV yet."
+    );
+    setClearButton(hasWith || hasWithout);
   }
 
   function loadCreditCards() {
-    if (!document.getElementById("credit-cards-list")) return;
+    if (!document.getElementById("credit-cards-with-cvv-list")) return;
     fetch("/credit-cards", {
       credentials: "same-origin",
       headers: { Accept: "application/json" }

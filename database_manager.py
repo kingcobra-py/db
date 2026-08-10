@@ -802,11 +802,17 @@ class DatabaseManager:
                     ),
                 )
 
-    def get_all_credit_cards(self) -> list:
+    def get_all_credit_cards(self, *, with_cvv: bool | None = None) -> list:
         with self.connect() as db:
+            where = ''
+            if with_cvv is True:
+                where = self._cvv_clause(True)
+            elif with_cvv is False:
+                where = self._cvv_clause(False)
             cursor = db.execute(
-                '''SELECT card_number, exp_month, exp_year, cvv, file_path, line_number, created_at, job_id
-                   FROM extracted_credit_cards ORDER BY created_at DESC'''
+                f'''SELECT card_number, exp_month, exp_year, cvv, file_path, line_number, created_at, job_id
+                   FROM extracted_credit_cards {where}
+                   ORDER BY created_at DESC'''
             )
             return [
                 {
@@ -826,12 +832,24 @@ class DatabaseManager:
         with self.connect() as db:
             return int(db.execute('SELECT COUNT(*) FROM extracted_credit_cards').fetchone()[0])
 
-    def get_credit_cards(self, limit: int = 1000) -> tuple[list, int]:
+    @staticmethod
+    def _cvv_clause(with_cvv: bool) -> str:
+        if with_cvv:
+            return "WHERE cvv IS NOT NULL AND TRIM(cvv) != ''"
+        return "WHERE cvv IS NULL OR TRIM(cvv) = ''"
+
+    def get_credit_cards(self, limit: int = 1000, *, with_cvv: bool | None = None) -> tuple[list, int]:
         with self.connect() as db:
-            total = int(db.execute('SELECT COUNT(*) FROM extracted_credit_cards').fetchone()[0])
+            where = ''
+            if with_cvv is True:
+                where = self._cvv_clause(True)
+            elif with_cvv is False:
+                where = self._cvv_clause(False)
+            total = int(db.execute(f'SELECT COUNT(*) FROM extracted_credit_cards {where}').fetchone()[0])
             cursor = db.execute(
-                '''SELECT card_number, exp_month, exp_year, cvv, file_path, line_number, created_at, job_id
-                   FROM extracted_credit_cards ORDER BY created_at DESC LIMIT ?''',
+                f'''SELECT card_number, exp_month, exp_year, cvv, file_path, line_number, created_at, job_id
+                   FROM extracted_credit_cards {where}
+                   ORDER BY created_at DESC LIMIT ?''',
                 (max(1, int(limit)),),
             )
             cards = [
@@ -848,6 +866,14 @@ class DatabaseManager:
                 for r in cursor
             ]
             return cards, total
+
+    def get_credit_cards_split(self, limit: int = 1000) -> dict[str, tuple[list, int]]:
+        with_cvv, with_total = self.get_credit_cards(limit, with_cvv=True)
+        without_cvv, without_total = self.get_credit_cards(limit, with_cvv=False)
+        return {
+            'with_cvv': (with_cvv, with_total),
+            'without_cvv': (without_cvv, without_total),
+        }
 
     def clear_all_credit_cards(self) -> int:
         with self.connect() as db:
