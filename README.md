@@ -2,6 +2,17 @@
 
 A responsive web dashboard plus the original single-worker Telegram pipeline. Use only for channels and files you own or are authorized to inspect.
 
+## APK batch scanner (apkleaks-skills enhancements)
+
+This repo also vendors an enhanced snapshot of [`kingcobra-py/apkleaks-skills`](https://github.com/kingcobra-py/apkleaks-skills) under [`third_party/apkleaks-skills/`](third_party/apkleaks-skills/) with:
+
+- `AWS_Secret_Access_Key` detection
+- threaded multi-APK scanning + progress/status JSON
+- F-Droid downloader (`-n 100`)
+- `/dashboard` UI + local status API
+
+See [`third_party/apkleaks-skills/APPLY_TO_FORK.md`](third_party/apkleaks-skills/APPLY_TO_FORK.md) and the preview image [`third_party/apkleaks-skills/docs/dashboard-preview.png`](third_party/apkleaks-skills/docs/dashboard-preview.png).
+
 ## What changed
 
 - Responsive HTML/CSS dashboard for desktop and mobile

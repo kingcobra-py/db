@@ -1,0 +1,12 @@
+jadx/
+*.pyc
+*.egg-info/
+build/
+dist/
+venv/
+__pycache__/
+website/dist/
+website/node_modules/
+apks/
+results/
+*.part
