@@ -128,6 +128,11 @@ class DatabaseManager:
                 card_number TEXT NOT NULL, exp_month TEXT, exp_year TEXT, cvv TEXT,
                 file_path TEXT, line_number INTEGER,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS extracted_api_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER,
+                key_type TEXT NOT NULL, secret_value TEXT NOT NULL,
+                file_path TEXT, line_number INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
     def _job(self, r):
         return Job(
@@ -484,6 +489,7 @@ class DatabaseManager:
         with self.connect() as db:
             db.execute("DELETE FROM extracted_credentials WHERE job_id=?", (job_id,))
             db.execute("DELETE FROM extracted_credit_cards WHERE job_id=?", (job_id,))
+            db.execute("DELETE FROM extracted_api_keys WHERE job_id=?", (job_id,))
             cursor = db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
             return cursor.rowcount > 0
 
@@ -493,6 +499,7 @@ class DatabaseManager:
             count = int(db.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()["n"])
             db.execute("DELETE FROM extracted_credentials")
             db.execute("DELETE FROM extracted_credit_cards")
+            db.execute("DELETE FROM extracted_api_keys")
             db.execute("DELETE FROM jobs")
         return count
 
@@ -656,6 +663,7 @@ class DatabaseManager:
                 for jid in delete_ids:
                     db.execute("DELETE FROM extracted_credentials WHERE job_id=?", (jid,))
                     db.execute("DELETE FROM extracted_credit_cards WHERE job_id=?", (jid,))
+                    db.execute("DELETE FROM extracted_api_keys WHERE job_id=?", (jid,))
                     cur = db.execute("DELETE FROM jobs WHERE id=? AND status='pending'", (jid,))
                     removed += int(cur.rowcount)
         return {"removed": removed, "links": len(by_link), "candidates": len(delete_ids)}
@@ -878,6 +886,88 @@ class DatabaseManager:
     def clear_all_credit_cards(self) -> int:
         with self.connect() as db:
             cursor = db.execute('DELETE FROM extracted_credit_cards')
+            return cursor.rowcount
+
+    def save_api_keys(self, job_id: int, keys: list) -> None:
+        with self.connect() as db:
+            for key in keys:
+                db.execute(
+                    '''INSERT INTO extracted_api_keys
+                    (job_id, key_type, secret_value, file_path, line_number)
+                    VALUES (?, ?, ?, ?, ?)''',
+                    (
+                        job_id,
+                        key['key_type'],
+                        key['secret_value'],
+                        key.get('file', ''),
+                        key.get('line', 0),
+                    ),
+                )
+
+    @staticmethod
+    def _api_key_type_clause(group: str) -> str:
+        if group == 'sendgrid':
+            return "key_type = 'sendgrid'"
+        return "key_type LIKE 'stripe_%'"
+
+    def get_all_api_keys(self, *, group: str | None = None) -> list:
+        with self.connect() as db:
+            where = ''
+            if group == 'sendgrid':
+                where = f"WHERE {self._api_key_type_clause('sendgrid')}"
+            elif group == 'stripe':
+                where = f"WHERE {self._api_key_type_clause('stripe')}"
+            cursor = db.execute(
+                f'''SELECT key_type, secret_value, file_path, line_number, created_at, job_id
+                   FROM extracted_api_keys {where}
+                   ORDER BY created_at DESC'''
+            )
+            return [
+                {
+                    'key_type': r[0],
+                    'secret_value': r[1],
+                    'file_path': r[2] or '',
+                    'line_number': r[3] or 0,
+                    'created_at': r[4],
+                    'job_id': r[5],
+                }
+                for r in cursor
+            ]
+
+    def get_api_keys(self, limit: int = 1000, *, group: str) -> tuple[list, int]:
+        with self.connect() as db:
+            where = f"WHERE {self._api_key_type_clause(group)}"
+            total = int(db.execute(f'SELECT COUNT(*) FROM extracted_api_keys {where}').fetchone()[0])
+            cursor = db.execute(
+                f'''SELECT key_type, secret_value, file_path, line_number, created_at, job_id
+                   FROM extracted_api_keys {where}
+                   ORDER BY created_at DESC LIMIT ?''',
+                (max(1, int(limit)),),
+            )
+            keys = [
+                {
+                    'key_type': r[0],
+                    'secret_value': r[1],
+                    'file_path': r[2] or '',
+                    'line_number': r[3] or 0,
+                    'created_at': r[4],
+                    'job_id': r[5],
+                }
+                for r in cursor
+            ]
+            return keys, total
+
+    def get_api_keys_split(self, limit: int = 1000) -> dict[str, tuple[list, int]]:
+        sendgrid, sendgrid_total = self.get_api_keys(limit, group='sendgrid')
+        stripe, stripe_total = self.get_api_keys(limit, group='stripe')
+        return {
+            'sendgrid': (sendgrid, sendgrid_total),
+            'stripe': (stripe, stripe_total),
+        }
+
+    def clear_all_api_keys(self) -> int:
+        with self.connect() as db:
+            cursor = db.execute('DELETE FROM extracted_api_keys')
             return cursor.rowcount
 
     def stop_all_jobs(self) -> int:

