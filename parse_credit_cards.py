@@ -56,16 +56,16 @@ def _normalize_month(raw: str) -> str:
     return raw
 
 
-def format_credit_card_line(card: dict) -> str:
-    """Export format: cardnum|month|year|cvv"""
-    return "|".join(
-        [
-            str(card.get("card_number") or ""),
-            str(card.get("exp_month") or ""),
-            str(card.get("exp_year") or ""),
-            str(card.get("cvv") or ""),
-        ]
-    )
+def format_credit_card_line(card: dict, *, include_cvv: bool = True) -> str:
+    """Export format: cardnum|month|year|cvv (or cardnum|month|year when include_cvv=False)."""
+    parts = [
+        str(card.get("card_number") or ""),
+        str(card.get("exp_month") or ""),
+        str(card.get("exp_year") or ""),
+    ]
+    if include_cvv:
+        parts.append(str(card.get("cvv") or ""))
+    return "|".join(parts)
 
 
 def _is_credit_card_target(path: Path) -> bool:
