@@ -14,7 +14,6 @@ LOG = logging.getLogger("api_keys")
 PATTERNS = {
     "sendgrid": re.compile(r"SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}"),
     "stripe_live": re.compile(r"sk_live_[A-Za-z0-9]{24,}"),
-    "stripe_test": re.compile(r"sk_test_[A-Za-z0-9]{24,}"),
     "stripe_restricted": re.compile(r"rk_live_[A-Za-z0-9]{24,}"),
 }
 

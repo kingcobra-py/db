@@ -588,20 +588,22 @@ class SecurityTests(unittest.TestCase):
 
     def test_api_key_extraction(self):
         sendgrid = "SG." + ("A" * 22) + "." + ("B" * 43)
-        stripe = "sk_test_" + ("x" * 24)
+        stripe_live = "sk_live_" + ("x" * 24)
+        stripe_test = "sk_test_" + ("y" * 24)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._write_api_key_file(
                 root,
                 "host/Desktop/APIKEY.txt",
-                f"sendgrid={sendgrid}\nstripe={stripe}\n",
+                f"sendgrid={sendgrid}\nlive={stripe_live}\ntest={stripe_test}\n",
             )
             keys = extract_api_keys(root)
             types = {k["key_type"] for k in keys}
             values = {k["secret_value"] for k in keys}
-            self.assertEqual(types, {"sendgrid", "stripe_test"})
+            self.assertEqual(types, {"sendgrid", "stripe_live"})
             self.assertIn(sendgrid, values)
-            self.assertIn(stripe, values)
+            self.assertIn(stripe_live, values)
+            self.assertNotIn(stripe_test, values)
             self.assertEqual(format_api_key_line(keys[0]), keys[0]["secret_value"])
 
     def test_api_key_db_roundtrip(self):
