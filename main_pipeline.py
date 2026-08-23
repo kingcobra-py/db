@@ -24,6 +24,7 @@ from parse_credentials import scan_tree, write_results, extract_raw_credentials
 from parse_credit_cards import extract_credit_cards, format_credit_card_line, write_credit_cards_file
 from parse_passwords import extract_passwords, format_password_line, write_passwords_file
 from parse_api_keys import extract_api_keys, format_api_key_line, write_api_keys_file
+from parse_archive_passwords import extract_archive_passwords_from_messages
 from password_store import PasswordStore
 from session_store import SessionStore
 from secure_logging import configure_logging
@@ -594,8 +595,39 @@ class Pipeline:
         try: await message.edit(text)
         except Exception: pass  # Ignore 'message not modified', flood-wait, etc.
 
+    def harvest_archive_passwords(self, messages: list, inbox: Path | None = None) -> list[str]:
+        """Take archive unlock passwords from Telegram post text and store them."""
+        harvested = extract_archive_passwords_from_messages(messages)
+        if not harvested:
+            return []
+        try:
+            self.passwords.add_values(harvested)
+        except ValueError:
+            pass
+        if inbox is not None:
+            inbox.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path = inbox / "passwords.txt"
+            existing: list[str] = []
+            if path.is_file():
+                existing = [line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+            merged = existing[:]
+            seen = set(existing)
+            for password in harvested:
+                if password not in seen:
+                    merged.append(password)
+                    seen.add(password)
+            path.write_text("\n".join(merged) + ("\n" if merged else ""), encoding="utf-8")
+            path.chmod(0o600)
+        LOG.info(
+            "Harvested %s archive password(s) from post description",
+            len(harvested),
+            extra={"stage": "archive-passwords", "passwords_found": len(harvested)},
+        )
+        return harvested
+
     async def queue_messages(self,*,messages:list,job_key:int,chat_id:int,user_id:int,source:str,source_link:str|None=None,notify:bool=True,existing_job_id:int|None=None):
         inbox=self.s.inbox_dir/str(job_key); inbox.mkdir(parents=True,exist_ok=True,mode=0o700)
+        await asyncio.to_thread(self.harvest_archive_passwords, messages, inbox)
         media_messages=[m for m in messages if m.media]
         file_count=len(media_messages)
         progress=None
@@ -803,7 +835,11 @@ class Pipeline:
             if not isinstance(messages, list):
                 messages = [messages]
             for msg in messages:
-                if not msg or not getattr(msg, 'media', None):
+                if not msg:
+                    continue
+                if getattr(msg, 'raw_text', None) or getattr(msg, 'message', None):
+                    await asyncio.to_thread(self.harvest_archive_passwords, [msg], None)
+                if not getattr(msg, 'media', None):
                     continue
                 mid = int(msg.id)
                 if mid in skip_ids:
@@ -984,7 +1020,7 @@ class Pipeline:
                 {
                     m.id: m
                     for m in [message, *nearby]
-                    if m and m.grouped_id == message.grouped_id and m.media
+                    if m and m.grouped_id == message.grouped_id
                 }.values(),
                 key=lambda m: m.id,
             )

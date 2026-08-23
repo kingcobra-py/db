@@ -20,6 +20,7 @@ from parse_passwords import (
     write_passwords_file,
     _is_password_target,
 )
+from parse_archive_passwords import extract_archive_passwords, extract_archive_passwords_from_messages
 from parse_api_keys import (
     extract_api_keys,
     format_api_key_line,
@@ -744,6 +745,27 @@ class SecurityTests(unittest.TestCase):
                 out,
             )
             self.assertEqual(out.read_text(encoding="utf-8"), sendgrid + "\n")
+
+    def test_archive_passwords_from_post_text(self):
+        text = (
+            "🌙 MOON LOGS\n"
+            "🔐 Password: @MOONLOGS\n"
+            "pass: Cloud#99\n"
+            "Archive password = rar-unlock\n"
+            "Download: https://t.me/channel/12\n"
+            "Password: https://example.com/file.rar\n"
+        )
+        found = extract_archive_passwords(text)
+        self.assertIn("@MOONLOGS", found)
+        self.assertIn("Cloud#99", found)
+        self.assertIn("rar-unlock", found)
+        self.assertTrue(all(not item.startswith("http") for item in found))
+
+        next_line = extract_archive_passwords("Password\n@LOGACTIVE\n150 logs")
+        self.assertIn("@LOGACTIVE", next_line)
+
+        msg = SimpleNamespace(raw_text="RAR Password: unzip-me", message=None, text=None)
+        self.assertEqual(extract_archive_passwords_from_messages([msg]), ["unzip-me"])
 
 
 if __name__ == "__main__":

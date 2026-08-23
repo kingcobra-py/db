@@ -113,7 +113,7 @@
                   <input class="command-input" id="url" name="url" type="url" inputmode="url" placeholder="https://t.me/channel/100-105" required>
                   <button class="command-submit" type="submit">Queue download</button>
                 </div>
-                <p class="form-help">Any online Telegram session with channel access can download. Example: <code>channel/100-105</code>.</p>
+                <p class="form-help">Any online Telegram session with channel access can download. Example: <code>channel/100-105</code>. Archive passwords in each post description are extracted and added to the unlock list.</p>
               </form>
               <form method="post" action="/channel-scan" class="queue-form scan-form">
                 <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -124,7 +124,7 @@
                   <input class="command-input scan-id" name="end_id" type="number" min="1" placeholder="end" aria-label="End message id">
                   <button class="command-submit" type="submit">Scan &amp; queue media</button>
                 </div>
-                <p class="form-help">Finds messages that still have files, skips already completed/pending. Leave start/end blank to scan the latest ~2000.</p>
+                <p class="form-help">Finds messages that still have files, skips already completed/pending. Leave start/end blank to scan the latest ~2000. Post captions are scraped for archive passwords used to unlock those files.</p>
               </form>
             </div>
           </section>
@@ -297,7 +297,7 @@
           <section class="panel password-panel">
             <div class="panel-head"><div><p class="kicker">Extraction</p><h2>Archive passwords</h2></div><span class="head-icon" aria-hidden="true">⌘</span></div>
             <div class="panel-body">
-              <p class="muted">Encrypted at rest and shared only with the local extractor.</p>
+              <p class="muted">Encrypted at rest and shared with the local extractor. Passwords found in Telegram post descriptions (pass:, Password:, 🔐) are added here automatically when you queue a range.</p>
               <form method="post" action="/passwords" class="inline-form">
                 <input type="hidden" name="csrf" value="{{ csrf }}">
                 <label class="sr-only" for="archive-password">Archive password</label>

@@ -70,6 +70,10 @@ class PasswordStore:
                 self._save_unlocked(values)
         return added, len(candidates) - added
 
+    def add_values(self, passwords: list[str]) -> tuple[int, int]:
+        """Add already-split archive passwords. Returns (added, skipped)."""
+        return self.add_many("\n".join(passwords))
+
     def clear(self) -> int:
         """Delete all stored passwords. Returns the number removed."""
         with self.lock:
