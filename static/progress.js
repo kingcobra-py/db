@@ -386,29 +386,42 @@
 (function () {
   "use strict";
 
-  function setCreditCardActions(enabled) {
-    var exportButton = document.getElementById("credit-cards-export-btn");
+  function setExportButton(id, enabled) {
+    var exportButton = document.getElementById(id);
+    if (!exportButton) return;
+    exportButton.classList.toggle("is-disabled", !enabled);
+    exportButton.setAttribute("aria-disabled", enabled ? "false" : "true");
+    exportButton.tabIndex = enabled ? 0 : -1;
+  }
+
+  function setClearButton(enabled) {
     var clearButton = document.getElementById("credit-cards-clear-btn");
-    if (exportButton) {
-      exportButton.classList.toggle("is-disabled", !enabled);
-      exportButton.setAttribute("aria-disabled", enabled ? "false" : "true");
-      exportButton.tabIndex = enabled ? 0 : -1;
-    }
     if (clearButton) clearButton.disabled = !enabled;
   }
 
-  function renderCreditCards(cards) {
-    var container = document.getElementById("credit-cards-list");
-    if (!container) return;
+  function renderCreditCardSection(containerId, exportButtonId, payload, emptyText) {
+    var container = document.getElementById(containerId);
+    if (!container) return false;
     container.replaceChildren();
 
-    if (!Array.isArray(cards) || cards.length === 0) {
+    var cards = payload && payload.cards ? payload.cards : [];
+    var total = payload && payload.total != null ? payload.total : cards.length;
+    var showing = payload && payload.showing != null ? payload.showing : cards.length;
+
+    if (!cards.length) {
       var empty = document.createElement("div");
       empty.className = "empty";
-      empty.textContent = "No credit cards yet.";
+      empty.textContent = emptyText;
       container.appendChild(empty);
-      setCreditCardActions(false);
-      return;
+      setExportButton(exportButtonId, false);
+      return false;
+    }
+
+    if (total > showing) {
+      var note = document.createElement("div");
+      note.className = "empty";
+      note.textContent = "Showing " + showing + " of " + total + " (most recent first). Export downloads all.";
+      container.appendChild(note);
     }
 
     cards.forEach(function (card) {
@@ -419,11 +432,28 @@
       row.appendChild(code);
       container.appendChild(row);
     });
-    setCreditCardActions(true);
+    setExportButton(exportButtonId, true);
+    return true;
+  }
+
+  function renderCreditCards(payload) {
+    var hasWith = renderCreditCardSection(
+      "credit-cards-with-cvv-list",
+      "credit-cards-with-cvv-export-btn",
+      payload && payload.with_cvv,
+      "No cards with CVV yet."
+    );
+    var hasWithout = renderCreditCardSection(
+      "credit-cards-without-cvv-list",
+      "credit-cards-without-cvv-export-btn",
+      payload && payload.without_cvv,
+      "No cards without CVV yet."
+    );
+    setClearButton(hasWith || hasWithout);
   }
 
   function loadCreditCards() {
-    if (!document.getElementById("credit-cards-list")) return;
+    if (!document.getElementById("credit-cards-with-cvv-list")) return;
     fetch("/credit-cards", {
       credentials: "same-origin",
       headers: { Accept: "application/json" }
@@ -431,14 +461,90 @@
       .then(function (response) {
         return response.ok ? response.json() : null;
       })
-      .then(function (cards) {
-        if (cards) renderCreditCards(cards);
+      .then(function (payload) {
+        if (payload) renderCreditCards(payload);
       })
       .catch(function () {});
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", loadCreditCards);
   else loadCreditCards();
+
+  function setApiKeyClearButton(enabled) {
+    var clearButton = document.getElementById("api-keys-clear-btn");
+    if (clearButton) clearButton.disabled = !enabled;
+  }
+
+  function renderApiKeySection(containerId, exportButtonId, payload, emptyText) {
+    var container = document.getElementById(containerId);
+    if (!container) return false;
+    container.replaceChildren();
+
+    var keys = payload && payload.keys ? payload.keys : [];
+    var total = payload && payload.total != null ? payload.total : keys.length;
+    var showing = payload && payload.showing != null ? payload.showing : keys.length;
+
+    if (!keys.length) {
+      var empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = emptyText;
+      container.appendChild(empty);
+      setExportButton(exportButtonId, false);
+      return false;
+    }
+
+    if (total > showing) {
+      var note = document.createElement("div");
+      note.className = "empty";
+      note.textContent = "Showing " + showing + " of " + total + " (most recent first). Export downloads all.";
+      container.appendChild(note);
+    }
+
+    keys.forEach(function (item) {
+      var row = document.createElement("div");
+      row.className = "credential-row";
+      var code = document.createElement("code");
+      code.textContent = String(item.line || "");
+      row.appendChild(code);
+      container.appendChild(row);
+    });
+    setExportButton(exportButtonId, true);
+    return true;
+  }
+
+  function renderApiKeys(payload) {
+    var hasSendgrid = renderApiKeySection(
+      "api-keys-sendgrid-list",
+      "api-keys-sendgrid-export-btn",
+      payload && payload.sendgrid,
+      "No SendGrid keys yet."
+    );
+    var hasStripe = renderApiKeySection(
+      "api-keys-stripe-list",
+      "api-keys-stripe-export-btn",
+      payload && payload.stripe,
+      "No Stripe keys yet."
+    );
+    setApiKeyClearButton(hasSendgrid || hasStripe);
+  }
+
+  function loadApiKeys() {
+    if (!document.getElementById("api-keys-sendgrid-list")) return;
+    fetch("/api-keys", {
+      credentials: "same-origin",
+      headers: { Accept: "application/json" }
+    })
+      .then(function (response) {
+        return response.ok ? response.json() : null;
+      })
+      .then(function (payload) {
+        if (payload) renderApiKeys(payload);
+      })
+      .catch(function () {});
+  }
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", loadApiKeys);
+  else loadApiKeys();
 })();
 
 (function () {

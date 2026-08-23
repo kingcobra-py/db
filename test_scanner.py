@@ -20,6 +20,12 @@ from parse_passwords import (
     write_passwords_file,
     _is_password_target,
 )
+from parse_api_keys import (
+    extract_api_keys,
+    format_api_key_line,
+    write_api_keys_file,
+    _is_api_key_target,
+)
 
 
 class SecurityTests(unittest.TestCase):
@@ -525,9 +531,59 @@ class SecurityTests(unittest.TestCase):
             )
             self.assertEqual(out.read_text(encoding="utf-8"), "4111111111111111|10|2031|123\n")
 
+    def test_credit_card_line_formats(self):
+        card = {
+            "card_number": "4111111111111111",
+            "exp_month": "10",
+            "exp_year": "2031",
+            "cvv": "123",
+        }
+        self.assertEqual(format_credit_card_line(card, include_cvv=True), "4111111111111111|10|2031|123")
+        self.assertEqual(format_credit_card_line(card, include_cvv=False), "4111111111111111|10|2031")
+
+    def test_credit_card_cvv_split_queries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            job_id = db.create_job(1, 0, 0, ["pack.zip"])
+            db.save_credit_cards(
+                job_id,
+                [
+                    {
+                        "card_number": "4111111111111111",
+                        "exp_month": "10",
+                        "exp_year": "2031",
+                        "cvv": "123",
+                        "file": "a.txt",
+                        "line": 1,
+                    },
+                    {
+                        "card_number": "5555555555554444",
+                        "exp_month": "01",
+                        "exp_year": "2028",
+                        "cvv": "",
+                        "file": "b.txt",
+                        "line": 2,
+                    },
+                ],
+            )
+            with_cvv, with_total = db.get_credit_cards(100, with_cvv=True)
+            without_cvv, without_total = db.get_credit_cards(100, with_cvv=False)
+            self.assertEqual(with_total, 1)
+            self.assertEqual(without_total, 1)
+            self.assertEqual(with_cvv[0]["card_number"], "4111111111111111")
+            self.assertEqual(without_cvv[0]["card_number"], "5555555555554444")
+
     @staticmethod
     def _write_text_file(root: Path, relative: str, body: str) -> Path:
         path = root.joinpath(*relative.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _write_api_key_file(root: Path, relative_dir: str, body: str) -> Path:
+        path = root.joinpath(*relative_dir.split("/"))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body, encoding="utf-8")
         return path
@@ -621,6 +677,73 @@ class SecurityTests(unittest.TestCase):
                 out,
             )
             self.assertEqual(out.read_text(encoding="utf-8"), "https://a.test|ada|pw-one\n")
+
+    def test_api_key_path_patterns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            api_file = self._write_api_key_file(root, "host/APIKEY.txt", "key\n")
+            passwords = self._write_api_key_file(root, "host/Passwords.txt", "key\n")
+            noise = root / "readme.txt"
+            noise.write_text("key\n", encoding="utf-8")
+            self.assertTrue(_is_api_key_target(api_file))
+            self.assertTrue(_is_api_key_target(passwords))
+            self.assertFalse(_is_api_key_target(noise))
+
+    def test_api_key_extraction(self):
+        sendgrid = "SG." + ("A" * 22) + "." + ("B" * 43)
+        stripe_live = "sk_live_" + ("x" * 24)
+        stripe_test = "sk_test_" + ("y" * 24)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_api_key_file(
+                root,
+                "host/Desktop/APIKEY.txt",
+                f"sendgrid={sendgrid}\nlive={stripe_live}\ntest={stripe_test}\n",
+            )
+            keys = extract_api_keys(root)
+            types = {k["key_type"] for k in keys}
+            values = {k["secret_value"] for k in keys}
+            self.assertEqual(types, {"sendgrid", "stripe_live"})
+            self.assertIn(sendgrid, values)
+            self.assertIn(stripe_live, values)
+            self.assertNotIn(stripe_test, values)
+            self.assertEqual(format_api_key_line(keys[0]), keys[0]["secret_value"])
+
+    def test_api_key_db_roundtrip(self):
+        sendgrid = "SG." + ("C" * 22) + "." + ("D" * 43)
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            job_id = db.create_job(77, 0, 0, ["pack.zip"])
+            db.save_api_keys(
+                job_id,
+                [
+                    {
+                        "key_type": "sendgrid",
+                        "secret_value": sendgrid,
+                        "file": "host/APIKEY.txt",
+                        "line": 1,
+                    }
+                ],
+            )
+            rows = db.get_all_api_keys(group="sendgrid")
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["secret_value"], sendgrid)
+            split = db.get_api_keys_split(100)
+            self.assertEqual(split["sendgrid"][1], 1)
+            self.assertEqual(split["stripe"][1], 0)
+            db.delete_job(job_id)
+            self.assertEqual(db.get_all_api_keys(), [])
+
+    def test_api_key_export_file(self):
+        sendgrid = "SG." + ("E" * 22) + "." + ("F" * 43)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "keys.txt"
+            write_api_keys_file(
+                [{"key_type": "sendgrid", "secret_value": sendgrid}],
+                out,
+            )
+            self.assertEqual(out.read_text(encoding="utf-8"), sendgrid + "\n")
 
 
 if __name__ == "__main__":
