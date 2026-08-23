@@ -440,3 +440,72 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", loadCreditCards);
   else loadCreditCards();
 })();
+
+(function () {
+  "use strict";
+
+  function setPasswordActions(enabled) {
+    var exportButton = document.getElementById("file-passwords-export-btn");
+    var clearButton = document.getElementById("file-passwords-clear-btn");
+    if (exportButton) {
+      exportButton.classList.toggle("is-disabled", !enabled);
+      exportButton.setAttribute("aria-disabled", enabled ? "false" : "true");
+      exportButton.tabIndex = enabled ? 0 : -1;
+    }
+    if (clearButton) clearButton.disabled = !enabled;
+  }
+
+  function renderPasswords(payload) {
+    var container = document.getElementById("file-passwords-list");
+    if (!container) return;
+    container.replaceChildren();
+
+    var records = payload && payload.passwords ? payload.passwords : [];
+    var total = payload && payload.total != null ? payload.total : records.length;
+    var showing = payload && payload.showing != null ? payload.showing : records.length;
+
+    if (!records.length) {
+      var empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "No passwords yet.";
+      container.appendChild(empty);
+      setPasswordActions(false);
+      return;
+    }
+
+    if (total > showing) {
+      var note = document.createElement("div");
+      note.className = "empty";
+      note.textContent = "Showing " + showing + " of " + total + " (most recent first). Export downloads all.";
+      container.appendChild(note);
+    }
+
+    records.forEach(function (record) {
+      var row = document.createElement("div");
+      row.className = "credential-row";
+      var code = document.createElement("code");
+      code.textContent = String(record.line || "");
+      row.appendChild(code);
+      container.appendChild(row);
+    });
+    setPasswordActions(true);
+  }
+
+  function loadPasswords() {
+    if (!document.getElementById("file-passwords-list")) return;
+    fetch("/file-passwords", {
+      credentials: "same-origin",
+      headers: { Accept: "application/json" }
+    })
+      .then(function (response) {
+        return response.ok ? response.json() : null;
+      })
+      .then(function (payload) {
+        if (payload) renderPasswords(payload);
+      })
+      .catch(function () {});
+  }
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", loadPasswords);
+  else loadPasswords();
+})();

@@ -128,6 +128,15 @@ class DatabaseManager:
                 card_number TEXT NOT NULL, exp_month TEXT, exp_year TEXT, cvv TEXT,
                 file_path TEXT, line_number INTEGER,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS extracted_passwords (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER,
+                url TEXT, username TEXT, password TEXT NOT NULL,
+                file_path TEXT, line_number INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_extracted_passwords_dedupe "
+                "ON extracted_passwords(url, username, password)"
+            )
 
     def _job(self, r):
         return Job(
@@ -484,6 +493,7 @@ class DatabaseManager:
         with self.connect() as db:
             db.execute("DELETE FROM extracted_credentials WHERE job_id=?", (job_id,))
             db.execute("DELETE FROM extracted_credit_cards WHERE job_id=?", (job_id,))
+            db.execute("DELETE FROM extracted_passwords WHERE job_id=?", (job_id,))
             cursor = db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
             return cursor.rowcount > 0
 
@@ -493,6 +503,7 @@ class DatabaseManager:
             count = int(db.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()["n"])
             db.execute("DELETE FROM extracted_credentials")
             db.execute("DELETE FROM extracted_credit_cards")
+            db.execute("DELETE FROM extracted_passwords")
             db.execute("DELETE FROM jobs")
         return count
 
@@ -656,6 +667,7 @@ class DatabaseManager:
                 for jid in delete_ids:
                     db.execute("DELETE FROM extracted_credentials WHERE job_id=?", (jid,))
                     db.execute("DELETE FROM extracted_credit_cards WHERE job_id=?", (jid,))
+                    db.execute("DELETE FROM extracted_passwords WHERE job_id=?", (jid,))
                     cur = db.execute("DELETE FROM jobs WHERE id=? AND status='pending'", (jid,))
                     removed += int(cur.rowcount)
         return {"removed": removed, "links": len(by_link), "candidates": len(delete_ids)}
@@ -825,6 +837,71 @@ class DatabaseManager:
     def clear_all_credit_cards(self) -> int:
         with self.connect() as db:
             cursor = db.execute('DELETE FROM extracted_credit_cards')
+            return cursor.rowcount
+
+    def save_passwords(self, job_id: int, records: list) -> None:
+        with self.connect() as db:
+            db.executemany(
+                '''INSERT OR IGNORE INTO extracted_passwords
+                (job_id, url, username, password, file_path, line_number)
+                VALUES (?, ?, ?, ?, ?, ?)''',
+                [
+                    (
+                        job_id,
+                        record.get('url', '') or '',
+                        record.get('username', '') or '',
+                        record['password'],
+                        record.get('file', ''),
+                        record.get('line', 0),
+                    )
+                    for record in records
+                    if record.get('password')
+                ],
+            )
+
+    def get_passwords(self, limit: int = 1000) -> tuple[list, int]:
+        with self.connect() as db:
+            total = int(db.execute('SELECT COUNT(*) FROM extracted_passwords').fetchone()[0])
+            cursor = db.execute(
+                '''SELECT url, username, password, file_path, line_number, created_at, job_id
+                   FROM extracted_passwords
+                   ORDER BY created_at DESC LIMIT ?''',
+                (max(1, int(limit)),),
+            )
+            records = [
+                {
+                    'url': r[0] or '',
+                    'username': r[1] or '',
+                    'password': r[2],
+                    'file_path': r[3] or '',
+                    'line_number': r[4] or 0,
+                    'created_at': r[5],
+                    'job_id': r[6],
+                }
+                for r in cursor
+            ]
+            return records, total
+
+    def iter_all_passwords(self):
+        with self.connect() as db:
+            cursor = db.execute(
+                '''SELECT url, username, password FROM extracted_passwords
+                   ORDER BY created_at DESC'''
+            )
+            for row in cursor:
+                yield {
+                    'url': row[0] or '',
+                    'username': row[1] or '',
+                    'password': row[2],
+                }
+
+    def count_passwords(self) -> int:
+        with self.connect() as db:
+            return int(db.execute('SELECT COUNT(*) FROM extracted_passwords').fetchone()[0])
+
+    def clear_all_passwords(self) -> int:
+        with self.connect() as db:
+            cursor = db.execute('DELETE FROM extracted_passwords')
             return cursor.rowcount
 
     def stop_all_jobs(self) -> int:

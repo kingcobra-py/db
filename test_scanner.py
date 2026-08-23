@@ -14,6 +14,12 @@ from parse_credit_cards import (
     write_credit_cards_file,
     _is_credit_card_target,
 )
+from parse_passwords import (
+    extract_passwords,
+    format_password_line,
+    write_passwords_file,
+    _is_password_target,
+)
 
 
 class SecurityTests(unittest.TestCase):
@@ -518,6 +524,103 @@ class SecurityTests(unittest.TestCase):
                 out,
             )
             self.assertEqual(out.read_text(encoding="utf-8"), "4111111111111111|10|2031|123\n")
+
+    @staticmethod
+    def _write_text_file(root: Path, relative: str, body: str) -> Path:
+        path = root.joinpath(*relative.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def test_password_path_patterns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            passwords = self._write_text_file(root, "host/Passwords.txt", "URL: https://a.com\nUSER: a\nPASS: secret1\n")
+            all_passwords = self._write_text_file(root, "host/All Passwords.txt", "URL: https://b.com\nUSER: b\nPASS: secret2\n")
+            folder = self._write_text_file(root, "host/Passwords/Chrome.txt", "URL: https://c.com\nUSER: c\nPASS: secret3\n")
+            cookies = self._write_text_file(root, "host/Cookies.txt", "URL: https://d.com\nUSER: d\nPASS: secret4\n")
+            notes = self._write_text_file(root, "host/readme.txt", "just a note\n")
+            sniffed = self._write_text_file(root, "host/Desktop/notes.txt", "Username: eve\nPassword: SniffPass1\n")
+            self.assertTrue(_is_password_target(passwords))
+            self.assertTrue(_is_password_target(all_passwords))
+            self.assertTrue(_is_password_target(folder))
+            self.assertTrue(_is_password_target(sniffed))
+            self.assertFalse(_is_password_target(cookies))
+            self.assertFalse(_is_password_target(notes))
+
+    def test_password_stealer_block_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_text_file(
+                root,
+                "host/Passwords.txt",
+                "SOFT: Chrome\nURL: https://accounts.google.com/signin\nUSER: user@gmail.com\nPASS: MyP@ss1\n\n"
+                "Host: facebook.com\nLogin: john\nPassword: hunter2\n",
+            )
+            records = extract_passwords(root)
+            lines = {format_password_line(r) for r in records}
+            self.assertIn("https://accounts.google.com/signin|user@gmail.com|MyP@ss1", lines)
+            self.assertIn("facebook.com|john|hunter2", lines)
+
+    def test_password_inline_and_json_formats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_text_file(
+                root,
+                "host/All Passwords.txt",
+                "https://example.com:alice:S3cret!\n"
+                "bob@mail.com:InboxPass9\n"
+                "https://shop.test|carol|PipePass\n"
+                '{"url":"https://json.test","username":"dave","password":"JsonPass1"}\n'
+                "URL: https://skip.test\nUSER: nobody\nPASS: ****\n",
+            )
+            records = extract_passwords(root)
+            lines = {format_password_line(r) for r in records}
+            self.assertIn("https://example.com|alice|S3cret!", lines)
+            self.assertIn("|bob@mail.com|InboxPass9", lines)
+            self.assertIn("https://shop.test|carol|PipePass", lines)
+            self.assertIn("https://json.test|dave|JsonPass1", lines)
+            self.assertTrue(all("****" not in line for line in lines))
+
+    def test_password_db_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            job_id = db.create_job(42, 0, 0, ["pack.zip"])
+            db.save_passwords(
+                job_id,
+                [
+                    {
+                        "url": "https://a.test",
+                        "username": "ada",
+                        "password": "pw-one",
+                        "file": "host/Passwords.txt",
+                        "line": 3,
+                    },
+                    {
+                        "url": "https://a.test",
+                        "username": "ada",
+                        "password": "pw-one",
+                        "file": "dup.txt",
+                        "line": 1,
+                    },
+                ],
+            )
+            rows, total = db.get_passwords(100)
+            self.assertEqual(total, 1)
+            self.assertEqual(rows[0]["username"], "ada")
+            self.assertEqual(format_password_line(rows[0]), "https://a.test|ada|pw-one")
+            db.delete_job(job_id)
+            self.assertEqual(db.count_passwords(), 0)
+
+    def test_password_export_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "passwords.txt"
+            write_passwords_file(
+                [{"url": "https://a.test", "username": "ada", "password": "pw-one"}],
+                out,
+            )
+            self.assertEqual(out.read_text(encoding="utf-8"), "https://a.test|ada|pw-one\n")
 
 
 if __name__ == "__main__":

