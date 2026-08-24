@@ -21,19 +21,23 @@ class DatabaseManager:
         self.path = path; self.inbox_dir = inbox_dir; self.work_dir = work_dir; self.output_dir = output_dir
         self.config_path = self.path.parent / "config.json"
 
-    def _connect(self):
-        db = sqlite3.connect(self.path, timeout=30); db.row_factory = sqlite3.Row
-        db.execute("PRAGMA journal_mode=WAL"); db.execute("PRAGMA synchronous=FULL"); db.execute("PRAGMA busy_timeout=30000")
+    def _connect(self, timeout: float = 30.0):
+        wait = max(0.05, float(timeout))
+        db = sqlite3.connect(self.path, timeout=wait)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA synchronous=FULL")
+        db.execute(f"PRAGMA busy_timeout={max(1, int(wait * 1000))}")
         return db
 
     @contextmanager
-    def connect(self):
+    def connect(self, timeout: float = 30.0):
         """Commit-or-rollback like sqlite3's own context manager, then always close.
 
         `with sqlite3.Connection` only manages the transaction, not the handle.
         Leaving handles open leaks WAL/SHM files and locks the database on Windows.
         """
-        with closing(self._connect()) as db:
+        with closing(self._connect(timeout)) as db:
             with db:
                 yield db
 
@@ -297,7 +301,7 @@ class DatabaseManager:
 
     def ingest_status(self) -> dict[str, Any]:
         """Snapshot for dashboard/health: queued vs active download rows."""
-        with self.connect() as db:
+        with self.connect(timeout=5) as db:
             rows = list(db.execute(
                 """SELECT id, progress_stage, input_files_json, source_link
                    FROM jobs WHERE status IN ('pending','running') AND source='channel-link'
@@ -365,10 +369,14 @@ class DatabaseManager:
             )
 
     def update_progress(self,job_id,stage,done,total,filename,index,count):
-        with self.connect() as db:
-            db.execute("""UPDATE jobs SET progress_stage=?,progress_done=?,progress_total=?,progress_file=?,
-                progress_index=?,progress_count=?,updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-                (stage,int(done),int(total),filename,int(index),int(count),job_id))
+        try:
+            with self.connect(timeout=1.0) as db:
+                db.execute("""UPDATE jobs SET progress_stage=?,progress_done=?,progress_total=?,progress_file=?,
+                    progress_index=?,progress_count=?,updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                    (stage,int(done),int(total),filename,int(index),int(count),job_id))
+        except sqlite3.OperationalError:
+            # Progress is best-effort; never block extraction or the dashboard on a locked DB.
+            return
 
     def mark_fetching_if_pending(self, job_id: int) -> bool:
         """Atomically move a queued job to Running/Fetching before download starts."""
@@ -404,22 +412,25 @@ class DatabaseManager:
         with self.connect() as db: db.execute("UPDATE jobs SET status='failed',error=?,completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?",(str(error)[:2000],job_id))
 
     def stats(self):
-        with self.connect() as db:
+        with self.connect(timeout=5) as db:
             counts={r['status']:int(r['n']) for r in db.execute("SELECT status,COUNT(*) n FROM jobs GROUP BY status")}
         return {k:counts.get(k,0) for k in ('pending','running','completed','failed')}
 
     def recent(self,limit=25, status: str | None = None):
-        with self.connect() as db:
+        # Omit output_text/summary_json — those are large blobs and the job list only needs metrics.
+        columns = (
+            "id,message_id,status,progress_stage,source,source_link,"
+            "summary_data,error,created_at,updated_at"
+        )
+        with self.connect(timeout=5) as db:
             if status in {'pending', 'running', 'completed', 'failed'}:
                 rows = db.execute(
-                    "SELECT id,message_id,status,progress_stage,source,source_link,output_text,summary_json,summary_data,error,created_at,updated_at "
-                    "FROM jobs WHERE status=? ORDER BY id DESC LIMIT ?",
+                    f"SELECT {columns} FROM jobs WHERE status=? ORDER BY id DESC LIMIT ?",
                     (status, limit),
                 ).fetchall()
             else:
                 rows = db.execute(
-                    "SELECT id,message_id,status,progress_stage,source,source_link,output_text,summary_json,summary_data,error,created_at,updated_at "
-                    "FROM jobs ORDER BY id DESC LIMIT ?",
+                    f"SELECT {columns} FROM jobs ORDER BY id DESC LIMIT ?",
                     (limit,),
                 ).fetchall()
             out = []
@@ -443,7 +454,7 @@ class DatabaseManager:
 
     def live_jobs(self, limit: int = 40) -> list[dict[str, Any]]:
         """Compact progress snapshot for active dashboard rows only."""
-        with self.connect() as db:
+        with self.connect(timeout=5) as db:
             rows = db.execute(
                 """SELECT id, status, progress_stage, progress_done, progress_total,
                           progress_file, progress_index, progress_count
@@ -901,24 +912,27 @@ class DatabaseManager:
             return cursor.rowcount
 
     def save_passwords(self, job_id: int, records: list) -> None:
-        with self.connect() as db:
-            db.executemany(
-                '''INSERT OR IGNORE INTO extracted_passwords
-                (job_id, url, username, password, file_path, line_number)
-                VALUES (?, ?, ?, ?, ?, ?)''',
-                [
-                    (
-                        job_id,
-                        record.get('url', '') or '',
-                        record.get('username', '') or '',
-                        record['password'],
-                        record.get('file', ''),
-                        record.get('line', 0),
-                    )
-                    for record in records
-                    if record.get('password')
-                ],
+        rows = [
+            (
+                job_id,
+                record.get('url', '') or '',
+                record.get('username', '') or '',
+                record['password'],
+                record.get('file', ''),
+                record.get('line', 0),
             )
+            for record in records
+            if record.get('password')
+        ]
+        # Chunk inserts so a huge stealer dump cannot hold the write lock for minutes.
+        for offset in range(0, len(rows), 400):
+            with self.connect(timeout=15) as db:
+                db.executemany(
+                    '''INSERT OR IGNORE INTO extracted_passwords
+                    (job_id, url, username, password, file_path, line_number)
+                    VALUES (?, ?, ?, ?, ?, ?)''',
+                    rows[offset:offset + 400],
+                )
 
     def get_passwords(self, limit: int = 1000) -> tuple[list, int]:
         with self.connect() as db:

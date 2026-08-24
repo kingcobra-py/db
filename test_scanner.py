@@ -369,6 +369,20 @@ class SecurityTests(unittest.TestCase):
             row = db.recent(1)[0]
             self.assertEqual(row["metrics"]["files_scanned"], 12)
             self.assertEqual(row["metrics"]["findings"], 3)
+            self.assertNotIn("output_text", row)
+            self.assertNotIn("summary_json", row)
+
+    def test_update_progress_ignores_locked_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            job_id = db.create_job(1, 0, 0, ["a.rar"])
+
+            def boom(*_args, **_kwargs):
+                raise __import__("sqlite3").OperationalError("database is locked")
+
+            db.connect = boom  # type: ignore[method-assign]
+            db.update_progress(job_id, "scanning", 1, 2, "file.txt", 0, 1)
 
     def test_live_jobs_returns_active_only(self):
         with tempfile.TemporaryDirectory() as tmp:

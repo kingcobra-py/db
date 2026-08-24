@@ -83,6 +83,14 @@ class Dashboard:
         if not csrf or not hmac.compare_digest(csrf, expected):
             raise HTTPException(403,'Invalid CSRF token')
 
+    async def _safe_call(self, label: str, fn, *args, timeout: float = 8.0, fallback=None):
+        """Run a DB/IO call off-thread; never let a locked SQLite stall the dashboard."""
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(fn, *args), timeout)
+        except Exception:
+            LOG.warning('Dashboard query failed', extra={'stage': 'dashboard', 'query': label})
+            return fallback
+
     def _expand_message_range(self, url: str) -> list[str]:
         """
         Expand message range URLs into individual message URLs.
@@ -161,7 +169,12 @@ class Dashboard:
         async def health():
             payload = {'ok': True}
             if self.pipeline is not None:
-                ingest = await asyncio.to_thread(self.db.ingest_status)
+                ingest = await self._safe_call(
+                    'health-ingest',
+                    self.db.ingest_status,
+                    timeout=3.0,
+                    fallback={'queued': 0, 'active': None, 'active_count': 0},
+                )
                 hb = getattr(self.pipeline, '_ingest_worker_heartbeat', 0.0) or 0.0
                 per_session = getattr(self.pipeline, 'ingest_workers', 1)
                 capacity = (
@@ -207,13 +220,21 @@ class Dashboard:
             if not self._authorized(request): return RedirectResponse('/login',303)
             if self.pipeline is not None:
                 self.pipeline.kick_ingest()
-            # Parallel DB reads keep first paint fast; storage size is loaded async by the browser.
+            empty_stats = {'pending': 0, 'running': 0, 'completed': 0, 'failed': 0}
+            empty_ingest = {'queued': 0, 'active': None, 'active_jobs': [], 'active_count': 0}
+            # Parallel DB reads keep first paint fast; never wait on a locked jobs DB.
             stats, jobs, passwords, extraction_workers, ingest = await asyncio.gather(
-                asyncio.to_thread(self.db.stats),
-                asyncio.to_thread(self.db.recent, 1000),
-                asyncio.to_thread(self.passwords.list_masked),
-                asyncio.to_thread(self.db.get_extraction_workers, self.s.extraction_workers),
-                asyncio.to_thread(self.db.ingest_status),
+                self._safe_call('stats', self.db.stats, timeout=8.0, fallback=empty_stats),
+                self._safe_call('recent', self.db.recent, 1000, timeout=8.0, fallback=[]),
+                self._safe_call('passwords', self.passwords.list_masked, timeout=8.0, fallback=[]),
+                self._safe_call(
+                    'workers',
+                    self.db.get_extraction_workers,
+                    self.s.extraction_workers,
+                    timeout=8.0,
+                    fallback=self.s.extraction_workers,
+                ),
+                self._safe_call('ingest', self.db.ingest_status, timeout=8.0, fallback=empty_ingest),
             )
             sessions = []
             if self.pipeline is not None and hasattr(self.pipeline, 'session_status'):
@@ -242,9 +263,10 @@ class Dashboard:
             self._require(request)
             if self.pipeline is not None:
                 self.pipeline.kick_ingest()
+            empty_stats = {'pending': 0, 'running': 0, 'completed': 0, 'failed': 0}
             stats, live = await asyncio.gather(
-                asyncio.to_thread(self.db.stats),
-                asyncio.to_thread(self.db.live_jobs, 1000),
+                self._safe_call('pulse-stats', self.db.stats, timeout=5.0, fallback=empty_stats),
+                self._safe_call('pulse-jobs', self.db.live_jobs, 1000, timeout=5.0, fallback=[]),
             )
             sessions = []
             if self.pipeline is not None and hasattr(self.pipeline, 'session_status'):

@@ -1243,23 +1243,32 @@ class Pipeline:
                     await self.notify(job.chat_id,'⚠️ No credit cards found in extracted files',job.message_id)
                 LOG.info('No credit cards found', extra={'job_id': job.id, 'message_id': job.message_id, 'stage': 'processing'})
 
-            await self.notify(job.chat_id,'🔑 Scanning for passwords…',job.message_id)
-            raw_passwords=await asyncio.to_thread(
-                extract_passwords, root, 8, self.s.output_dir, self.s.max_scan_file_bytes
-            )
-            if raw_passwords:
-                await self.alert_passwords(job, raw_passwords)
-                if job.chat_id:
-                    passwords_msg=(
-                        f"🔑 Passwords extracted (url|username|password)\n"
-                        f"📊 Total passwords found: {len(raw_passwords)}\n"
-                        f"📁 Files containing passwords: {len(set(r['file'] for r in raw_passwords))}"
-                    )
-                    await self.notify(job.chat_id, passwords_msg, job.message_id)
+            # Login-password stealer extraction is opt-in. The default scan walks every
+            # Passwords.txt in a pack, inserts millions of rows, and locks the dashboard.
+            # Archive unlock passwords from Telegram captions are harvested separately.
+            if os.getenv('SCAN_LOGIN_PASSWORDS', '').strip().lower() in {'1', 'true', 'yes'}:
+                await self.notify(job.chat_id,'🔑 Scanning for passwords…',job.message_id)
+                raw_passwords=await asyncio.to_thread(
+                    extract_passwords, root, 8, self.s.output_dir, self.s.max_scan_file_bytes
+                )
+                if raw_passwords:
+                    await self.alert_passwords(job, raw_passwords)
+                    if job.chat_id:
+                        passwords_msg=(
+                            f"🔑 Passwords extracted (url|username|password)\n"
+                            f"📊 Total passwords found: {len(raw_passwords)}\n"
+                            f"📁 Files containing passwords: {len(set(r['file'] for r in raw_passwords))}"
+                        )
+                        await self.notify(job.chat_id, passwords_msg, job.message_id)
+                else:
+                    if job.chat_id:
+                        await self.notify(job.chat_id,'⚠️ No passwords found in extracted files',job.message_id)
+                    LOG.info('No passwords found', extra={'job_id': job.id, 'message_id': job.message_id, 'stage': 'processing'})
             else:
-                if job.chat_id:
-                    await self.notify(job.chat_id,'⚠️ No passwords found in extracted files',job.message_id)
-                LOG.info('No passwords found', extra={'job_id': job.id, 'message_id': job.message_id, 'stage': 'processing'})
+                LOG.info(
+                    'Skipping login-password file scan',
+                    extra={'job_id': job.id, 'message_id': job.message_id, 'stage': 'processing'},
+                )
 
             await self.notify(job.chat_id,'🔑 Scanning for SendGrid and Stripe keys…',job.message_id)
             raw_keys=await asyncio.to_thread(
