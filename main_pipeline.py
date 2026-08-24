@@ -52,7 +52,7 @@ class Pipeline:
     def __init__(self,s:Settings):
         self.s=s
         self.db=DatabaseManager(s.database_path,s.inbox_dir,s.work_dir,s.output_dir)
-        self.queue:asyncio.Queue[QueueItem]=asyncio.Queue(maxsize=100)
+        self.queue:asyncio.Queue[QueueItem]=asyncio.Queue()
         self._lock_file=None
         self._acquire_session_lock()
         self.session_store=SessionStore(s.session_store_path,s.password_encryption_key)
@@ -1259,6 +1259,7 @@ class Pipeline:
                 extra={'stage': 'startup', 'links': dedupe.get('links'), 'candidates': dedupe.get('candidates')},
             )
         queued = await asyncio.to_thread(self.db.count_queued_channel_downloads)
+        # Queue is unbounded so a large extract backlog cannot block dashboard startup.
         for job in extract_jobs:
             await self.queue.put(QueueItem(job.id))
         LOG.info(
