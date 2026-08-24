@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from cryptography.fernet import Fernet
 from main_pipeline import Pipeline, LiveSession
+from database_manager import DatabaseManager
 from password_store import PasswordStore
 from session_store import SessionStore
 from secure_logging import configure_logging, recent_activity_logs
@@ -116,6 +117,53 @@ class IngestSchedulingTests(unittest.IsolatedAsyncioTestCase):
         tasks = list(pipeline._ingest_tasks.values())
         release.set()
         await __import__('asyncio').gather(*tasks)
+
+
+class TelegramAlertTests(unittest.IsolatedAsyncioTestCase):
+    async def test_notify_cred_bot_never_delivers(self):
+        pipeline = object.__new__(Pipeline)
+        pipeline.s = SimpleNamespace(cred_alert_bot_token='123:ABC', cred_alert_chat_id=42)
+        sent = await pipeline.notify_cred_bot('sk_live_should_not_send')
+        self.assertFalse(sent)
+
+    async def test_alert_api_keys_saves_without_telegram(self):
+        sendgrid = 'SG.' + ('C' * 22) + '.' + ('D' * 43)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = DatabaseManager(root / 'jobs.sqlite3')
+            db.initialize()
+            job_id = db.create_job(1, 0, 0, ['pack.zip'])
+            job = db.get_job(job_id)
+            pipeline = object.__new__(Pipeline)
+            pipeline.db = db
+            pipeline.s = SimpleNamespace(
+                output_dir=root,
+                cred_alert_bot_token='123:ABC',
+                cred_alert_chat_id=42,
+            )
+            calls = []
+
+            async def spy(text, document=None):
+                calls.append((text, document))
+                return True
+
+            pipeline.notify_cred_bot = spy
+            await pipeline.alert_api_keys(
+                job,
+                [{
+                    'key_type': 'sendgrid',
+                    'secret_value': sendgrid,
+                    'file': 'host/APIKEY.txt',
+                    'line': 1,
+                }],
+            )
+            self.assertEqual(calls, [])
+            rows = db.get_all_api_keys(group='sendgrid')
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]['secret_value'], sendgrid)
+            keys_file = root / f'api-keys-{job.message_id}.txt'
+            self.assertTrue(keys_file.is_file())
+            self.assertIn(sendgrid, keys_file.read_text(encoding='utf-8'))
 
 
 if __name__=='__main__': unittest.main()
