@@ -21,7 +21,6 @@ from database_manager import DatabaseManager, Job
 from extractor import ArchiveProcessor
 from parse_credentials import scan_tree, write_results, extract_raw_credentials
 from parse_credit_cards import extract_credit_cards, write_credit_cards_file
-from parse_passwords import extract_passwords, write_passwords_file
 from parse_api_keys import extract_api_keys, write_api_keys_file
 from parse_archive_passwords import extract_archive_passwords_from_messages
 from password_store import PasswordStore
@@ -414,25 +413,6 @@ class Pipeline:
                 'cards_count': len(cards),
                 'files_with_cards': unique_files,
                 'stage': 'credit-card-alert',
-            },
-        )
-
-    async def alert_passwords(self, job: Job, records: list[dict]) -> None:
-        """Persist found login passwords locally. Do not send them to Telegram."""
-        if not records:
-            return
-        await asyncio.to_thread(self.db.save_passwords, job.id, records)
-        passwords_file = self.s.output_dir / f'passwords-{job.message_id}.txt'
-        await asyncio.to_thread(write_passwords_file, records, passwords_file)
-        unique_files = len({r['file'] for r in records})
-        LOG.info(
-            'Passwords extracted (Telegram delivery disabled)',
-            extra={
-                'job_id': job.id,
-                'message_id': job.message_id,
-                'passwords_count': len(records),
-                'files_with_passwords': unique_files,
-                'stage': 'password-alert',
             },
         )
 
@@ -1111,24 +1091,6 @@ class Pipeline:
                 await self.alert_credit_cards(job, raw_cards)
             else:
                 LOG.info('No credit cards found', extra={'job_id': job.id, 'message_id': job.message_id, 'stage': 'processing'})
-
-            # Login-password stealer extraction is opt-in. The default scan walks every
-            # Passwords.txt in a pack, inserts millions of rows, and locks the dashboard.
-            # Archive unlock passwords from Telegram captions are harvested separately.
-            if os.getenv('SCAN_LOGIN_PASSWORDS', '').strip().lower() in {'1', 'true', 'yes'}:
-                await self.notify(job.chat_id,'🔑 Scanning for passwords…',job.message_id)
-                raw_passwords=await asyncio.to_thread(
-                    extract_passwords, root, 8, self.s.output_dir, self.s.max_scan_file_bytes
-                )
-                if raw_passwords:
-                    await self.alert_passwords(job, raw_passwords)
-                else:
-                    LOG.info('No passwords found', extra={'job_id': job.id, 'message_id': job.message_id, 'stage': 'processing'})
-            else:
-                LOG.info(
-                    'Skipping login-password file scan',
-                    extra={'job_id': job.id, 'message_id': job.message_id, 'stage': 'processing'},
-                )
 
             await self.notify(job.chat_id,'🔑 Scanning for SendGrid and Stripe keys…',job.message_id)
             raw_keys=await asyncio.to_thread(

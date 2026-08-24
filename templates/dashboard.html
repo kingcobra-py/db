@@ -22,7 +22,6 @@
       <a class="rail-btn" href="#credentials" data-label="Credentials" aria-label="Credentials">◇</a>
       <a class="rail-btn" href="#credit-cards" data-label="Credit cards" aria-label="Credit cards">💳</a>
       <a class="rail-btn" href="#api-keys" data-label="API keys" aria-label="API keys">🔑</a>
-      <a class="rail-btn" href="#file-passwords" data-label="Passwords" aria-label="Passwords">⌥</a>
     </nav>
     <div class="rail-bottom">
       <button class="rail-btn" type="button" data-settings-toggle data-label="Settings" aria-label="Settings" aria-controls="settings-menu" aria-expanded="false">⚙</button>
@@ -419,25 +418,6 @@
           <form method="post" action="/api-keys/clear-all" data-confirm="Delete ALL SendGrid and Stripe keys?">
             <input type="hidden" name="csrf" value="{{ csrf }}">
             <button class="danger" type="submit" id="api-keys-clear-btn" disabled>Clear all API keys</button>
-          </form>
-        </div>
-      </section>
-
-      <section class="panel credentials-panel" id="file-passwords">
-        <div class="panel-head">
-          <div>
-            <p class="kicker">07 / Extracted</p>
-            <h2>Passwords</h2>
-            <p class="panel-note">Scraped from Passwords.txt, login dumps, and labeled text files. Format: url|username|password. Dashboard shows the most recent 1,000; export downloads the full set.</p>
-          </div>
-          <span class="head-icon" aria-hidden="true">🔑</span>
-        </div>
-        <div class="credentials-container"><div id="file-passwords-list" class="credentials-list"><div class="empty">No passwords yet.</div></div></div>
-        <div class="credentials-actions">
-          <a class="button-link ghost is-disabled" href="/file-passwords/export" id="file-passwords-export-btn" aria-disabled="true" tabindex="-1">Export</a>
-          <form method="post" action="/file-passwords/clear-all" data-confirm="Delete ALL extracted passwords?">
-            <input type="hidden" name="csrf" value="{{ csrf }}">
-            <button class="danger" type="submit" id="file-passwords-clear-btn" disabled>Clear passwords</button>
           </form>
         </div>
       </section>

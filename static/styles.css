@@ -560,3 +560,4 @@ footer{text-align:center;color:#71879a;font-size:11px;padding:30px 0 8px}
 @media(prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.001ms!important}
 }
+#file-passwords,.rail-btn[href="#file-passwords"]{display:none!important}
