@@ -474,6 +474,14 @@ td a:hover{text-decoration:underline}
 .credential-row{padding:11px 14px;border-bottom:1px solid var(--line);word-break:break-all;animation:logIn .25s ease both}
 .credential-row:last-child{border-bottom:0}
 .credentials-actions{display:flex;gap:10px;padding:14px 18px;border-top:1px solid var(--line)}
+.credit-cards-split{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:0 18px 14px}
+.credit-cards-column{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:rgba(5,12,20,.45)}
+.credit-cards-column-head{padding:14px 14px 0}
+.credit-cards-column-head h3{margin:0 0 4px;font-size:14px;letter-spacing:.04em;text-transform:uppercase}
+.credit-cards-column .credentials-container{max-height:340px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.credit-cards-column .credentials-actions{padding:12px 14px}
+.credit-cards-clear-row{padding:0 18px 18px;border-top:1px solid var(--line)}
+@media (max-width:900px){.credit-cards-split{grid-template-columns:1fr}}
 .credentials-actions form,.credentials-actions .button-link{flex:1;margin:0}.credentials-actions button{width:100%}
 
 .action-buttons{display:flex;justify-content:flex-end;margin-bottom:14px}.action-buttons form{margin:0}
@@ -552,3 +560,4 @@ footer{text-align:center;color:#71879a;font-size:11px;padding:30px 0 8px}
 @media(prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.001ms!important}
 }
+#file-passwords,.rail-btn[href="#file-passwords"]{display:none!important}

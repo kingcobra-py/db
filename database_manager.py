@@ -21,19 +21,23 @@ class DatabaseManager:
         self.path = path; self.inbox_dir = inbox_dir; self.work_dir = work_dir; self.output_dir = output_dir
         self.config_path = self.path.parent / "config.json"
 
-    def _connect(self):
-        db = sqlite3.connect(self.path, timeout=30); db.row_factory = sqlite3.Row
-        db.execute("PRAGMA journal_mode=WAL"); db.execute("PRAGMA synchronous=FULL"); db.execute("PRAGMA busy_timeout=30000")
+    def _connect(self, timeout: float = 30.0):
+        wait = max(0.05, float(timeout))
+        db = sqlite3.connect(self.path, timeout=wait)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA synchronous=FULL")
+        db.execute(f"PRAGMA busy_timeout={max(1, int(wait * 1000))}")
         return db
 
     @contextmanager
-    def connect(self):
+    def connect(self, timeout: float = 30.0):
         """Commit-or-rollback like sqlite3's own context manager, then always close.
 
         `with sqlite3.Connection` only manages the transaction, not the handle.
         Leaving handles open leaks WAL/SHM files and locks the database on Windows.
         """
-        with closing(self._connect()) as db:
+        with closing(self._connect(timeout)) as db:
             with db:
                 yield db
 
@@ -126,6 +130,20 @@ class DatabaseManager:
             db.execute('''CREATE TABLE IF NOT EXISTS extracted_credit_cards (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER,
                 card_number TEXT NOT NULL, exp_month TEXT, exp_year TEXT, cvv TEXT,
+                file_path TEXT, line_number INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS extracted_passwords (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER,
+                url TEXT, username TEXT, password TEXT NOT NULL,
+                file_path TEXT, line_number INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_extracted_passwords_dedupe "
+                "ON extracted_passwords(url, username, password)"
+            )
+            db.execute('''CREATE TABLE IF NOT EXISTS extracted_api_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER,
+                key_type TEXT NOT NULL, secret_value TEXT NOT NULL,
                 file_path TEXT, line_number INTEGER,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
@@ -283,7 +301,7 @@ class DatabaseManager:
 
     def ingest_status(self) -> dict[str, Any]:
         """Snapshot for dashboard/health: queued vs active download rows."""
-        with self.connect() as db:
+        with self.connect(timeout=5) as db:
             rows = list(db.execute(
                 """SELECT id, progress_stage, input_files_json, source_link
                    FROM jobs WHERE status IN ('pending','running') AND source='channel-link'
@@ -351,10 +369,14 @@ class DatabaseManager:
             )
 
     def update_progress(self,job_id,stage,done,total,filename,index,count):
-        with self.connect() as db:
-            db.execute("""UPDATE jobs SET progress_stage=?,progress_done=?,progress_total=?,progress_file=?,
-                progress_index=?,progress_count=?,updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-                (stage,int(done),int(total),filename,int(index),int(count),job_id))
+        try:
+            with self.connect(timeout=1.0) as db:
+                db.execute("""UPDATE jobs SET progress_stage=?,progress_done=?,progress_total=?,progress_file=?,
+                    progress_index=?,progress_count=?,updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                    (stage,int(done),int(total),filename,int(index),int(count),job_id))
+        except sqlite3.OperationalError:
+            # Progress is best-effort; never block extraction or the dashboard on a locked DB.
+            return
 
     def mark_fetching_if_pending(self, job_id: int) -> bool:
         """Atomically move a queued job to Running/Fetching before download starts."""
@@ -390,22 +412,25 @@ class DatabaseManager:
         with self.connect() as db: db.execute("UPDATE jobs SET status='failed',error=?,completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?",(str(error)[:2000],job_id))
 
     def stats(self):
-        with self.connect() as db:
+        with self.connect(timeout=5) as db:
             counts={r['status']:int(r['n']) for r in db.execute("SELECT status,COUNT(*) n FROM jobs GROUP BY status")}
         return {k:counts.get(k,0) for k in ('pending','running','completed','failed')}
 
     def recent(self,limit=25, status: str | None = None):
-        with self.connect() as db:
+        # Omit output_text/summary_json — those are large blobs and the job list only needs metrics.
+        columns = (
+            "id,message_id,status,progress_stage,source,source_link,"
+            "summary_data,error,created_at,updated_at"
+        )
+        with self.connect(timeout=5) as db:
             if status in {'pending', 'running', 'completed', 'failed'}:
                 rows = db.execute(
-                    "SELECT id,message_id,status,progress_stage,source,source_link,output_text,summary_json,summary_data,error,created_at,updated_at "
-                    "FROM jobs WHERE status=? ORDER BY id DESC LIMIT ?",
+                    f"SELECT {columns} FROM jobs WHERE status=? ORDER BY id DESC LIMIT ?",
                     (status, limit),
                 ).fetchall()
             else:
                 rows = db.execute(
-                    "SELECT id,message_id,status,progress_stage,source,source_link,output_text,summary_json,summary_data,error,created_at,updated_at "
-                    "FROM jobs ORDER BY id DESC LIMIT ?",
+                    f"SELECT {columns} FROM jobs ORDER BY id DESC LIMIT ?",
                     (limit,),
                 ).fetchall()
             out = []
@@ -429,7 +454,7 @@ class DatabaseManager:
 
     def live_jobs(self, limit: int = 40) -> list[dict[str, Any]]:
         """Compact progress snapshot for active dashboard rows only."""
-        with self.connect() as db:
+        with self.connect(timeout=5) as db:
             rows = db.execute(
                 """SELECT id, status, progress_stage, progress_done, progress_total,
                           progress_file, progress_index, progress_count
@@ -484,6 +509,8 @@ class DatabaseManager:
         with self.connect() as db:
             db.execute("DELETE FROM extracted_credentials WHERE job_id=?", (job_id,))
             db.execute("DELETE FROM extracted_credit_cards WHERE job_id=?", (job_id,))
+            db.execute("DELETE FROM extracted_passwords WHERE job_id=?", (job_id,))
+            db.execute("DELETE FROM extracted_api_keys WHERE job_id=?", (job_id,))
             cursor = db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
             return cursor.rowcount > 0
 
@@ -493,6 +520,8 @@ class DatabaseManager:
             count = int(db.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()["n"])
             db.execute("DELETE FROM extracted_credentials")
             db.execute("DELETE FROM extracted_credit_cards")
+            db.execute("DELETE FROM extracted_passwords")
+            db.execute("DELETE FROM extracted_api_keys")
             db.execute("DELETE FROM jobs")
         return count
 
@@ -656,6 +685,8 @@ class DatabaseManager:
                 for jid in delete_ids:
                     db.execute("DELETE FROM extracted_credentials WHERE job_id=?", (jid,))
                     db.execute("DELETE FROM extracted_credit_cards WHERE job_id=?", (jid,))
+                    db.execute("DELETE FROM extracted_passwords WHERE job_id=?", (jid,))
+                    db.execute("DELETE FROM extracted_api_keys WHERE job_id=?", (jid,))
                     cur = db.execute("DELETE FROM jobs WHERE id=? AND status='pending'", (jid,))
                     removed += int(cur.rowcount)
         return {"removed": removed, "links": len(by_link), "candidates": len(delete_ids)}
@@ -802,11 +833,17 @@ class DatabaseManager:
                     ),
                 )
 
-    def get_all_credit_cards(self) -> list:
+    def get_all_credit_cards(self, *, with_cvv: bool | None = None) -> list:
         with self.connect() as db:
+            where = ''
+            if with_cvv is True:
+                where = self._cvv_clause(True)
+            elif with_cvv is False:
+                where = self._cvv_clause(False)
             cursor = db.execute(
-                '''SELECT card_number, exp_month, exp_year, cvv, file_path, line_number, created_at, job_id
-                   FROM extracted_credit_cards ORDER BY created_at DESC'''
+                f'''SELECT card_number, exp_month, exp_year, cvv, file_path, line_number, created_at, job_id
+                   FROM extracted_credit_cards {where}
+                   ORDER BY created_at DESC'''
             )
             return [
                 {
@@ -822,9 +859,206 @@ class DatabaseManager:
                 for r in cursor
             ]
 
+    def count_credit_cards(self) -> int:
+        with self.connect() as db:
+            return int(db.execute('SELECT COUNT(*) FROM extracted_credit_cards').fetchone()[0])
+
+    @staticmethod
+    def _cvv_clause(with_cvv: bool) -> str:
+        if with_cvv:
+            return "WHERE cvv IS NOT NULL AND TRIM(cvv) != ''"
+        return "WHERE cvv IS NULL OR TRIM(cvv) = ''"
+
+    def get_credit_cards(self, limit: int = 1000, *, with_cvv: bool | None = None) -> tuple[list, int]:
+        with self.connect() as db:
+            where = ''
+            if with_cvv is True:
+                where = self._cvv_clause(True)
+            elif with_cvv is False:
+                where = self._cvv_clause(False)
+            total = int(db.execute(f'SELECT COUNT(*) FROM extracted_credit_cards {where}').fetchone()[0])
+            cursor = db.execute(
+                f'''SELECT card_number, exp_month, exp_year, cvv, file_path, line_number, created_at, job_id
+                   FROM extracted_credit_cards {where}
+                   ORDER BY created_at DESC LIMIT ?''',
+                (max(1, int(limit)),),
+            )
+            cards = [
+                {
+                    'card_number': r[0],
+                    'exp_month': r[1] or '',
+                    'exp_year': r[2] or '',
+                    'cvv': r[3] or '',
+                    'file_path': r[4] or '',
+                    'line_number': r[5] or 0,
+                    'created_at': r[6],
+                    'job_id': r[7],
+                }
+                for r in cursor
+            ]
+            return cards, total
+
+    def get_credit_cards_split(self, limit: int = 1000) -> dict[str, tuple[list, int]]:
+        with_cvv, with_total = self.get_credit_cards(limit, with_cvv=True)
+        without_cvv, without_total = self.get_credit_cards(limit, with_cvv=False)
+        return {
+            'with_cvv': (with_cvv, with_total),
+            'without_cvv': (without_cvv, without_total),
+        }
+
     def clear_all_credit_cards(self) -> int:
         with self.connect() as db:
             cursor = db.execute('DELETE FROM extracted_credit_cards')
+            return cursor.rowcount
+
+    def save_passwords(self, job_id: int, records: list) -> None:
+        rows = [
+            (
+                job_id,
+                record.get('url', '') or '',
+                record.get('username', '') or '',
+                record['password'],
+                record.get('file', ''),
+                record.get('line', 0),
+            )
+            for record in records
+            if record.get('password')
+        ]
+        # Chunk inserts so a huge stealer dump cannot hold the write lock for minutes.
+        for offset in range(0, len(rows), 400):
+            with self.connect(timeout=15) as db:
+                db.executemany(
+                    '''INSERT OR IGNORE INTO extracted_passwords
+                    (job_id, url, username, password, file_path, line_number)
+                    VALUES (?, ?, ?, ?, ?, ?)''',
+                    rows[offset:offset + 400],
+                )
+
+    def get_passwords(self, limit: int = 1000) -> tuple[list, int]:
+        with self.connect() as db:
+            total = int(db.execute('SELECT COUNT(*) FROM extracted_passwords').fetchone()[0])
+            cursor = db.execute(
+                '''SELECT url, username, password, file_path, line_number, created_at, job_id
+                   FROM extracted_passwords
+                   ORDER BY created_at DESC LIMIT ?''',
+                (max(1, int(limit)),),
+            )
+            records = [
+                {
+                    'url': r[0] or '',
+                    'username': r[1] or '',
+                    'password': r[2],
+                    'file_path': r[3] or '',
+                    'line_number': r[4] or 0,
+                    'created_at': r[5],
+                    'job_id': r[6],
+                }
+                for r in cursor
+            ]
+            return records, total
+
+    def iter_all_passwords(self):
+        with self.connect() as db:
+            cursor = db.execute(
+                '''SELECT url, username, password FROM extracted_passwords
+                   ORDER BY created_at DESC'''
+            )
+            for row in cursor:
+                yield {
+                    'url': row[0] or '',
+                    'username': row[1] or '',
+                    'password': row[2],
+                }
+
+    def count_passwords(self) -> int:
+        with self.connect() as db:
+            return int(db.execute('SELECT COUNT(*) FROM extracted_passwords').fetchone()[0])
+
+    def clear_all_passwords(self) -> int:
+        with self.connect() as db:
+            cursor = db.execute('DELETE FROM extracted_passwords')
+            return cursor.rowcount
+
+    def save_api_keys(self, job_id: int, keys: list) -> None:
+        with self.connect() as db:
+            for key in keys:
+                db.execute(
+                    '''INSERT INTO extracted_api_keys
+                    (job_id, key_type, secret_value, file_path, line_number)
+                    VALUES (?, ?, ?, ?, ?)''',
+                    (
+                        job_id,
+                        key['key_type'],
+                        key['secret_value'],
+                        key.get('file', ''),
+                        key.get('line', 0),
+                    ),
+                )
+
+    @staticmethod
+    def _api_key_type_clause(group: str) -> str:
+        if group == 'sendgrid':
+            return "key_type = 'sendgrid'"
+        return "key_type LIKE 'stripe_%'"
+
+    def get_all_api_keys(self, *, group: str | None = None) -> list:
+        with self.connect() as db:
+            where = ''
+            if group == 'sendgrid':
+                where = f"WHERE {self._api_key_type_clause('sendgrid')}"
+            elif group == 'stripe':
+                where = f"WHERE {self._api_key_type_clause('stripe')}"
+            cursor = db.execute(
+                f'''SELECT key_type, secret_value, file_path, line_number, created_at, job_id
+                   FROM extracted_api_keys {where}
+                   ORDER BY created_at DESC'''
+            )
+            return [
+                {
+                    'key_type': r[0],
+                    'secret_value': r[1],
+                    'file_path': r[2] or '',
+                    'line_number': r[3] or 0,
+                    'created_at': r[4],
+                    'job_id': r[5],
+                }
+                for r in cursor
+            ]
+
+    def get_api_keys(self, limit: int = 1000, *, group: str) -> tuple[list, int]:
+        with self.connect() as db:
+            where = f"WHERE {self._api_key_type_clause(group)}"
+            total = int(db.execute(f'SELECT COUNT(*) FROM extracted_api_keys {where}').fetchone()[0])
+            cursor = db.execute(
+                f'''SELECT key_type, secret_value, file_path, line_number, created_at, job_id
+                   FROM extracted_api_keys {where}
+                   ORDER BY created_at DESC LIMIT ?''',
+                (max(1, int(limit)),),
+            )
+            keys = [
+                {
+                    'key_type': r[0],
+                    'secret_value': r[1],
+                    'file_path': r[2] or '',
+                    'line_number': r[3] or 0,
+                    'created_at': r[4],
+                    'job_id': r[5],
+                }
+                for r in cursor
+            ]
+            return keys, total
+
+    def get_api_keys_split(self, limit: int = 1000) -> dict[str, tuple[list, int]]:
+        sendgrid, sendgrid_total = self.get_api_keys(limit, group='sendgrid')
+        stripe, stripe_total = self.get_api_keys(limit, group='stripe')
+        return {
+            'sendgrid': (sendgrid, sendgrid_total),
+            'stripe': (stripe, stripe_total),
+        }
+
+    def clear_all_api_keys(self) -> int:
+        with self.connect() as db:
+            cursor = db.execute('DELETE FROM extracted_api_keys')
             return cursor.rowcount
 
     def stop_all_jobs(self) -> int:

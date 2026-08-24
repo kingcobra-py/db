@@ -14,6 +14,19 @@ from parse_credit_cards import (
     write_credit_cards_file,
     _is_credit_card_target,
 )
+from parse_passwords import (
+    extract_passwords,
+    format_password_line,
+    write_passwords_file,
+    _is_password_target,
+)
+from parse_archive_passwords import extract_archive_passwords, extract_archive_passwords_from_messages
+from parse_api_keys import (
+    extract_api_keys,
+    format_api_key_line,
+    write_api_keys_file,
+    _is_api_key_target,
+)
 
 
 class SecurityTests(unittest.TestCase):
@@ -356,6 +369,20 @@ class SecurityTests(unittest.TestCase):
             row = db.recent(1)[0]
             self.assertEqual(row["metrics"]["files_scanned"], 12)
             self.assertEqual(row["metrics"]["findings"], 3)
+            self.assertNotIn("output_text", row)
+            self.assertNotIn("summary_json", row)
+
+    def test_update_progress_ignores_locked_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            job_id = db.create_job(1, 0, 0, ["a.rar"])
+
+            def boom(*_args, **_kwargs):
+                raise __import__("sqlite3").OperationalError("database is locked")
+
+            db.connect = boom  # type: ignore[method-assign]
+            db.update_progress(job_id, "scanning", 1, 2, "file.txt", 0, 1)
 
     def test_live_jobs_returns_active_only(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -518,6 +545,241 @@ class SecurityTests(unittest.TestCase):
                 out,
             )
             self.assertEqual(out.read_text(encoding="utf-8"), "4111111111111111|10|2031|123\n")
+
+    def test_credit_card_line_formats(self):
+        card = {
+            "card_number": "4111111111111111",
+            "exp_month": "10",
+            "exp_year": "2031",
+            "cvv": "123",
+        }
+        self.assertEqual(format_credit_card_line(card, include_cvv=True), "4111111111111111|10|2031|123")
+        self.assertEqual(format_credit_card_line(card, include_cvv=False), "4111111111111111|10|2031")
+
+    def test_credit_card_cvv_split_queries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            job_id = db.create_job(1, 0, 0, ["pack.zip"])
+            db.save_credit_cards(
+                job_id,
+                [
+                    {
+                        "card_number": "4111111111111111",
+                        "exp_month": "10",
+                        "exp_year": "2031",
+                        "cvv": "123",
+                        "file": "a.txt",
+                        "line": 1,
+                    },
+                    {
+                        "card_number": "5555555555554444",
+                        "exp_month": "01",
+                        "exp_year": "2028",
+                        "cvv": "",
+                        "file": "b.txt",
+                        "line": 2,
+                    },
+                ],
+            )
+            with_cvv, with_total = db.get_credit_cards(100, with_cvv=True)
+            without_cvv, without_total = db.get_credit_cards(100, with_cvv=False)
+            self.assertEqual(with_total, 1)
+            self.assertEqual(without_total, 1)
+            self.assertEqual(with_cvv[0]["card_number"], "4111111111111111")
+            self.assertEqual(without_cvv[0]["card_number"], "5555555555554444")
+
+    @staticmethod
+    def _write_text_file(root: Path, relative: str, body: str) -> Path:
+        path = root.joinpath(*relative.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _write_api_key_file(root: Path, relative_dir: str, body: str) -> Path:
+        path = root.joinpath(*relative_dir.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def test_password_path_patterns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            passwords = self._write_text_file(root, "host/Passwords.txt", "URL: https://a.com\nUSER: a\nPASS: secret1\n")
+            all_passwords = self._write_text_file(root, "host/All Passwords.txt", "URL: https://b.com\nUSER: b\nPASS: secret2\n")
+            folder = self._write_text_file(root, "host/Passwords/Chrome.txt", "URL: https://c.com\nUSER: c\nPASS: secret3\n")
+            cookies = self._write_text_file(root, "host/Cookies.txt", "URL: https://d.com\nUSER: d\nPASS: secret4\n")
+            notes = self._write_text_file(root, "host/readme.txt", "just a note\n")
+            sniffed = self._write_text_file(root, "host/Desktop/notes.txt", "Username: eve\nPassword: SniffPass1\n")
+            self.assertTrue(_is_password_target(passwords))
+            self.assertTrue(_is_password_target(all_passwords))
+            self.assertTrue(_is_password_target(folder))
+            self.assertTrue(_is_password_target(sniffed))
+            self.assertFalse(_is_password_target(cookies))
+            self.assertFalse(_is_password_target(notes))
+
+    def test_password_stealer_block_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_text_file(
+                root,
+                "host/Passwords.txt",
+                "SOFT: Chrome\nURL: https://accounts.google.com/signin\nUSER: user@gmail.com\nPASS: MyP@ss1\n\n"
+                "Host: facebook.com\nLogin: john\nPassword: hunter2\n",
+            )
+            records = extract_passwords(root)
+            lines = {format_password_line(r) for r in records}
+            self.assertIn("https://accounts.google.com/signin|user@gmail.com|MyP@ss1", lines)
+            self.assertIn("facebook.com|john|hunter2", lines)
+
+    def test_password_inline_and_json_formats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_text_file(
+                root,
+                "host/All Passwords.txt",
+                "https://example.com:alice:S3cret!\n"
+                "bob@mail.com:InboxPass9\n"
+                "https://shop.test|carol|PipePass\n"
+                '{"url":"https://json.test","username":"dave","password":"JsonPass1"}\n'
+                "URL: https://skip.test\nUSER: nobody\nPASS: ****\n",
+            )
+            records = extract_passwords(root)
+            lines = {format_password_line(r) for r in records}
+            self.assertIn("https://example.com|alice|S3cret!", lines)
+            self.assertIn("|bob@mail.com|InboxPass9", lines)
+            self.assertIn("https://shop.test|carol|PipePass", lines)
+            self.assertIn("https://json.test|dave|JsonPass1", lines)
+            self.assertTrue(all("****" not in line for line in lines))
+
+    def test_password_db_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            job_id = db.create_job(42, 0, 0, ["pack.zip"])
+            db.save_passwords(
+                job_id,
+                [
+                    {
+                        "url": "https://a.test",
+                        "username": "ada",
+                        "password": "pw-one",
+                        "file": "host/Passwords.txt",
+                        "line": 3,
+                    },
+                    {
+                        "url": "https://a.test",
+                        "username": "ada",
+                        "password": "pw-one",
+                        "file": "dup.txt",
+                        "line": 1,
+                    },
+                ],
+            )
+            rows, total = db.get_passwords(100)
+            self.assertEqual(total, 1)
+            self.assertEqual(rows[0]["username"], "ada")
+            self.assertEqual(format_password_line(rows[0]), "https://a.test|ada|pw-one")
+            db.delete_job(job_id)
+            self.assertEqual(db.count_passwords(), 0)
+
+    def test_password_export_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "passwords.txt"
+            write_passwords_file(
+                [{"url": "https://a.test", "username": "ada", "password": "pw-one"}],
+                out,
+            )
+            self.assertEqual(out.read_text(encoding="utf-8"), "https://a.test|ada|pw-one\n")
+
+    def test_api_key_path_patterns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            api_file = self._write_api_key_file(root, "host/APIKEY.txt", "key\n")
+            passwords = self._write_api_key_file(root, "host/Passwords.txt", "key\n")
+            noise = root / "readme.txt"
+            noise.write_text("key\n", encoding="utf-8")
+            self.assertTrue(_is_api_key_target(api_file))
+            self.assertTrue(_is_api_key_target(passwords))
+            self.assertFalse(_is_api_key_target(noise))
+
+    def test_api_key_extraction(self):
+        sendgrid = "SG." + ("A" * 22) + "." + ("B" * 43)
+        stripe_live = "sk_live_" + ("x" * 24)
+        stripe_test = "sk_test_" + ("y" * 24)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_api_key_file(
+                root,
+                "host/Desktop/APIKEY.txt",
+                f"sendgrid={sendgrid}\nlive={stripe_live}\ntest={stripe_test}\n",
+            )
+            keys = extract_api_keys(root)
+            types = {k["key_type"] for k in keys}
+            values = {k["secret_value"] for k in keys}
+            self.assertEqual(types, {"sendgrid", "stripe_live"})
+            self.assertIn(sendgrid, values)
+            self.assertIn(stripe_live, values)
+            self.assertNotIn(stripe_test, values)
+            self.assertEqual(format_api_key_line(keys[0]), keys[0]["secret_value"])
+
+    def test_api_key_db_roundtrip(self):
+        sendgrid = "SG." + ("C" * 22) + "." + ("D" * 43)
+        with tempfile.TemporaryDirectory() as tmp:
+            db = DatabaseManager(Path(tmp) / "jobs.sqlite3")
+            db.initialize()
+            job_id = db.create_job(77, 0, 0, ["pack.zip"])
+            db.save_api_keys(
+                job_id,
+                [
+                    {
+                        "key_type": "sendgrid",
+                        "secret_value": sendgrid,
+                        "file": "host/APIKEY.txt",
+                        "line": 1,
+                    }
+                ],
+            )
+            rows = db.get_all_api_keys(group="sendgrid")
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["secret_value"], sendgrid)
+            split = db.get_api_keys_split(100)
+            self.assertEqual(split["sendgrid"][1], 1)
+            self.assertEqual(split["stripe"][1], 0)
+            db.delete_job(job_id)
+            self.assertEqual(db.get_all_api_keys(), [])
+
+    def test_api_key_export_file(self):
+        sendgrid = "SG." + ("E" * 22) + "." + ("F" * 43)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "keys.txt"
+            write_api_keys_file(
+                [{"key_type": "sendgrid", "secret_value": sendgrid}],
+                out,
+            )
+            self.assertEqual(out.read_text(encoding="utf-8"), sendgrid + "\n")
+
+    def test_archive_passwords_from_post_text(self):
+        text = (
+            "🌙 MOON LOGS\n"
+            "🔐 Password: @MOONLOGS\n"
+            "pass: Cloud#99\n"
+            "Archive password = rar-unlock\n"
+            "Download: https://t.me/channel/12\n"
+            "Password: https://example.com/file.rar\n"
+        )
+        found = extract_archive_passwords(text)
+        self.assertIn("@MOONLOGS", found)
+        self.assertIn("Cloud#99", found)
+        self.assertIn("rar-unlock", found)
+        self.assertTrue(all(not item.startswith("http") for item in found))
+
+        next_line = extract_archive_passwords("Password\n@LOGACTIVE\n150 logs")
+        self.assertIn("@LOGACTIVE", next_line)
+
+        msg = SimpleNamespace(raw_text="RAR Password: unzip-me", message=None, text=None)
+        self.assertEqual(extract_archive_passwords_from_messages([msg]), ["unzip-me"])
 
 
 if __name__ == "__main__":
